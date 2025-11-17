@@ -16,6 +16,7 @@ require_once 'nav_bar.php';
 $filter_date = $_GET['date'] ?? date('Y-m-d');
 $filter_office = $_GET['office'] ?? 'all';
 $filter_status = $_GET['status'] ?? 'all';
+$absent_date = $_GET['absent_date'] ?? $filter_date; // Separate date for absent filtering
 
 // Get all offices for filter
 $offices_query = "SELECT id, name FROM offices ORDER BY name";
@@ -87,6 +88,90 @@ $stats_stmt->execute();
 $stats = $stats_stmt->get_result()->fetch_assoc();
 $stats_stmt->close();
 
+// Get employees on leave for the selected date
+$on_leave_query = "
+    SELECT DISTINCT e.id as employee_id
+    FROM leave_applications la
+    INNER JOIN employees e ON la.employee_id = e.id
+    WHERE la.status = 'approved'
+    AND ? BETWEEN la.start_date AND la.end_date
+";
+
+if ($filter_office !== 'all') {
+    $on_leave_query .= " AND e.office_id = " . intval($filter_office);
+}
+
+$on_leave_stmt = $conn->prepare($on_leave_query);
+$on_leave_stmt->bind_param("s", $absent_date);
+$on_leave_stmt->execute();
+$on_leave_result = $on_leave_stmt->get_result();
+$on_leave_employees = [];
+while($row = $on_leave_result->fetch_assoc()) {
+    $on_leave_employees[] = $row['employee_id'];
+}
+$on_leave_stmt->close();
+
+// Get absent employees for the selected date - EXCLUDING THOSE ON LEAVE
+$absent_query = "
+    SELECT 
+        e.id,
+        e.employee_id as emp_number,
+        e.first_name,
+        e.last_name,
+        e.email,
+        e.phone,
+        o.name as office_name,
+        d.name as department_name
+    FROM employees e
+    INNER JOIN offices o ON e.office_id = o.id
+    LEFT JOIN departments d ON e.department_id = d.id
+    WHERE e.employee_status = 'active'
+    AND e.id NOT IN (
+        SELECT DISTINCT employee_id 
+        FROM attendance 
+        WHERE DATE(clock_in) = ?
+    )
+";
+
+// Exclude employees who are on leave
+if (!empty($on_leave_employees)) {
+    $absent_query .= " AND e.id NOT IN (" . implode(',', array_map('intval', $on_leave_employees)) . ")";
+}
+
+if ($filter_office !== 'all') {
+    $absent_query .= " AND e.office_id = " . intval($filter_office);
+}
+
+$absent_query .= " ORDER BY o.name, e.first_name, e.last_name";
+
+$absent_stmt = $conn->prepare($absent_query);
+$absent_stmt->bind_param("s", $absent_date);
+$absent_stmt->execute();
+$absent_employees = $absent_stmt->get_result();
+$absent_stmt->close();
+
+// Get total active employees
+$total_employees_query = "
+    SELECT COUNT(*) as total_active 
+    FROM employees 
+    WHERE employee_status = 'active'
+";
+if ($filter_office !== 'all') {
+    $total_employees_query .= " AND office_id = " . intval($filter_office);
+}
+
+$total_result = $conn->query($total_employees_query);
+$total_employees_data = $total_result->fetch_assoc();
+$total_employees = $total_employees_data['total_active'] ?? 0;
+
+// Update statistics
+$stats['absent_employees'] = $absent_employees->num_rows;
+$stats['total_active'] = $total_employees;
+$stats['on_leave'] = count($on_leave_employees);
+
+// Calculate present percentage
+$present_percentage = $total_employees > 0 ? round(($stats['total_employees'] / $total_employees) * 100, 1) : 0;
+
 // Get office-wise breakdown
 $office_stats_query = "
     SELECT 
@@ -138,6 +223,16 @@ function calculateDistance($lat1, $lon1, $lat2, $lon2) {
 .stat-card:hover {
     transform: translateY(-5px);
     box-shadow: 0 10px 25px rgba(74, 144, 226, 0.2);
+}
+
+.stat-card.absent-stats {
+    background: linear-gradient(135deg, rgba(220, 53, 69, 0.1) 0%, rgba(220, 53, 69, 0.05) 100%);
+    border: 1px solid rgba(220, 53, 69, 0.2);
+}
+
+.stat-card.leave-stats {
+    background: linear-gradient(135deg, rgba(255, 193, 7, 0.1) 0%, rgba(255, 193, 7, 0.05) 100%);
+    border: 1px solid rgba(255, 193, 7, 0.2);
 }
 
 .stat-icon {
@@ -267,6 +362,72 @@ function calculateDistance($lat1, $lon1, $lat2, $lon2) {
     font-weight: 700;
     color: var(--success-color);
 }
+
+.badge-danger {
+    background: rgba(220, 53, 69, 0.2);
+    color: var(--danger-color);
+    border: 1px solid rgba(220, 53, 69, 0.3);
+}
+
+.badge-warning {
+    background: rgba(255, 193, 7, 0.2);
+    color: var(--warning-color);
+    border: 1px solid rgba(255, 193, 7, 0.3);
+}
+
+.absent-table {
+    margin-top: 2rem;
+}
+
+.text-muted i {
+    margin-right: 0.5rem;
+}
+
+.accuracy-indicator {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.accuracy-high {
+    background: rgba(40, 167, 69, 0.2);
+    color: var(--success-color);
+}
+
+.accuracy-medium {
+    background: rgba(255, 193, 7, 0.2);
+    color: var(--warning-color);
+}
+
+.accuracy-low {
+    background: rgba(220, 53, 69, 0.2);
+    color: var(--danger-color);
+}
+
+.present-percentage {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.6);
+    margin-top: 0.25rem;
+}
+
+.attendance-rate {
+    font-size: 0.9rem;
+    color: var(--success-color);
+    font-weight: 600;
+    margin-top: 0.5rem;
+}
+
+.absent-filters {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+.absent-filters .filter-row {
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
 </style>
 
 <div class="main-content">
@@ -295,13 +456,24 @@ function calculateDistance($lat1, $lon1, $lat2, $lon2) {
         <div class="dashboard-stats">
             <div class="stat-card">
                 <div class="stat-icon"><i class="fas fa-users"></i></div>
-                <div class="stat-value"><?= $stats['total_employees'] ?? 0 ?></div>
-                <div class="stat-label">Total Attendance</div>
+                <div class="stat-value"><?= $stats['total_active'] ?? 0 ?></div>
+                <div class="stat-label">Total Active Employees</div>
             </div>
             <div class="stat-card">
                 <div class="stat-icon"><i class="fas fa-user-check" style="color: var(--success-color);"></i></div>
-                <div class="stat-value" style="color: var(--success-color);"><?= $stats['currently_in'] ?? 0 ?></div>
-                <div class="stat-label">Currently Clocked In</div>
+                <div class="stat-value" style="color: var(--success-color);"><?= $stats['total_employees'] ?? 0 ?></div>
+                <div class="stat-label">Present Today</div>
+                <div class="present-percentage"><?= $present_percentage ?>% Attendance Rate</div>
+            </div>
+            <div class="stat-card absent-stats">
+                <div class="stat-icon"><i class="fas fa-user-times" style="color: var(--danger-color);"></i></div>
+                <div class="stat-value" style="color: var(--danger-color);"><?= $stats['absent_employees'] ?? 0 ?></div>
+                <div class="stat-label">Absent (Unexcused)</div>
+            </div>
+            <div class="stat-card leave-stats">
+                <div class="stat-icon"><i class="fas fa-umbrella-beach" style="color: var(--warning-color);"></i></div>
+                <div class="stat-value" style="color: var(--warning-color);"><?= $stats['on_leave'] ?? 0 ?></div>
+                <div class="stat-label">On Leave</div>
             </div>
             <div class="stat-card">
                 <div class="stat-icon"><i class="fas fa-user-minus" style="color: var(--primary-color);"></i></div>
@@ -325,7 +497,7 @@ function calculateDistance($lat1, $lon1, $lat2, $lon2) {
         <!-- Filters -->
         <div class="glass-card">
             <div class="card-header">
-                <h3><i class="fas fa-filter"></i> Filters</h3>
+                <h3><i class="fas fa-filter"></i> Attendance Records Filters</h3>
             </div>
             <div class="card-body">
                 <form method="GET" action="" class="filter-row">
@@ -495,6 +667,93 @@ function calculateDistance($lat1, $lon1, $lat2, $lon2) {
                 </div>
             </div>
         </div>
+
+        <!-- Absent Employees -->
+        <div class="glass-card">
+            <div class="card-header">
+                <h3><i class="fas fa-user-times" style="color: var(--danger-color);"></i> Absent Employees - <?= date('F j, Y', strtotime($absent_date)) ?></h3>
+                <div class="export-buttons">
+                    <button onclick="exportAbsentToCSV()" class="btn btn-sm btn-secondary">
+                        <i class="fas fa-file-csv"></i> Export CSV
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <!-- Absent Employees Filters -->
+                <div class="absent-filters">
+                    <form method="GET" action="" class="filter-row">
+                        <input type="hidden" name="date" value="<?= htmlspecialchars($filter_date) ?>">
+                        <input type="hidden" name="office" value="<?= htmlspecialchars($filter_office) ?>">
+                        <input type="hidden" name="status" value="<?= htmlspecialchars($filter_status) ?>">
+                        <div class="filter-group">
+                            <label>Check Absence For Date</label>
+                            <input type="date" name="absent_date" value="<?= htmlspecialchars($absent_date) ?>" 
+                                   class="form-control" max="<?= date('Y-m-d') ?>">
+                        </div>
+                        <div class="filter-group">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-search"></i> Check Absence
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="attendance-table-wrapper">
+                    <table class="table" id="absent-table">
+                        <thead>
+                            <tr>
+                                <th>Employee ID</th>
+                                <th>Name</th>
+                                <th>Office</th>
+                                <th>Department</th>
+                                <th>Contact</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php 
+                        // Reset pointer for absent employees result
+                        $absent_employees->data_seek(0);
+                        while($employee = $absent_employees->fetch_assoc()): 
+                        ?>
+                            <tr>
+                                <td>
+                                    <strong><?= htmlspecialchars($employee['emp_number']) ?></strong>
+                                </td>
+                                <td>
+                                    <strong><?= htmlspecialchars($employee['first_name'] . ' ' . $employee['last_name']) ?></strong>
+                                </td>
+                                <td><?= htmlspecialchars($employee['office_name']) ?></td>
+                                <td><?= htmlspecialchars($employee['department_name'] ?? 'N/A') ?></td>
+                                <td>
+                                    <small><?= htmlspecialchars($employee['email']) ?></small><br>
+                                    <small class="text-muted"><?= htmlspecialchars($employee['phone']) ?></small>
+                                </td>
+                                <td>
+                                    <span class="badge badge-danger">
+                                        <i class="fas fa-user-times"></i> ABSENT
+                                    </span>
+                                </td>
+                            </tr>
+                        <?php endwhile; ?>
+                        <?php if ($absent_employees->num_rows === 0): ?>
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">
+                                    <i class="fas fa-check-circle" style="color: var(--success-color);"></i>
+                                    All active employees are accounted for on <?= date('F j, Y', strtotime($absent_date)) ?>!
+                                    <br>
+                                    <small>
+                                        (Present: <?= $stats['total_employees'] ?? 0 ?>, 
+                                        On Leave: <?= $stats['on_leave'] ?? 0 ?>)
+                                    </small>
+                                </td>
+                            </tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -537,9 +796,29 @@ function exportToCSV() {
     window.URL.revokeObjectURL(url);
 }
 
+// Export absent employees to CSV
+function exportAbsentToCSV() {
+    const table = document.getElementById('absent-table');
+    const rows = Array.from(table.querySelectorAll('tr'));
+    const csv = rows.map(row => {
+        const cells = Array.from(row.querySelectorAll('th, td'));
+        return cells.map(cell => {
+            const text = cell.innerText.replace(/\n/g, ' ').replace(/,/g, ';');
+            return `"${text}"`;
+        }).join(',');
+    }).join('\n');
+    
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `absent_employees_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+}
+
 // Auto-refresh every 30 seconds
 setTimeout(() => {
     location.reload();
 }, 30000);
 </script>
-
