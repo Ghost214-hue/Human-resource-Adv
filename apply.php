@@ -7,12 +7,19 @@ ob_start();
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
-
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+require_once 'auth.php';
+require_once 'auth_check.php';
 require_once 'sidebar.php';
 require_once 'config.php';
 $conn = getConnection();
@@ -28,24 +35,7 @@ $user = [
     'id' => $_SESSION['user_id']
 ];
 
-// Permission checking function
-function hasPermission($required_role) {
-    global $user;
-    $role_hierarchy = [
-        'managing_director' => 6,
-        'super_admin' => 5,
-        'hr_manager' => 4,
-        'dept_head' => 3,
-        'section_head' => 2,
-        'manager' => 1,
-        'employee' => 0
-    ];
 
-    $user_level = $role_hierarchy[$user['role']] ?? 0;
-    $required_level = $role_hierarchy[$required_role] ?? 0;
-
-    return $user_level >= $required_level;
-}
 
 function getFlashMessage() {
     if (isset($_SESSION['flash_message'])) {

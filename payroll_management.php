@@ -12,8 +12,16 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 
+require_once 'auth_check.php';
 require_once 'config.php';
+require_once 'auth.php';
 
 // Get current user from session
 $user = [
@@ -22,20 +30,6 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    $roles = [
-        'super_admin' => 3,
-        'hr_manager' => 2,
-        'dept_head' => 1,
-        'employee' => 0
-    ];
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    return $userLevel >= $requiredLevel;
-}
 
 // Helper functions
 function getEmployeeTypeBadge($type) {
@@ -99,110 +93,41 @@ if (isset($_GET['action']) && $_GET['action'] == 'delete' && isset($_GET['id']) 
 
 // Handle edit form submission
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['update_payroll']) && hasPermission('hr_manager')) {
-    $payroll_id = $_POST['payroll_id'] ?? '';
-    $emp_id = $_POST['emp_id'] ?? ''; // Added to identify employee
-    $employment_type = $_POST['employment_type'] ?? '';
-    $status = $_POST['status'] ?? '';
-    $salary = $_POST['salary'] ?? '';
-    $bank_id = $_POST['bank_id'] ?? '';
-    $bank_account = $_POST['bank_account'] ?? '';
-    $job_group = $_POST['job_group'] ?? '';
-    $sha_number = $_POST['sha_number'] ?? '';
-    $kra_pin = $_POST['kra_pin'] ?? '';
-    $nssf = $_POST['nssf'] ?? '';
-    $gross_pay = $_POST['gross_pay'] ?? '';
-    $net_pay = $_POST['net_pay'] ?? '';
-
-    // Validate inputs
-    $valid_employment_types = ['permanent', 'contract', 'temporary'];
-    $valid_statuses = ['active', 'pending', 'inactive'];
-    if (empty($payroll_id) || empty($emp_id) || empty($employment_type) || empty($status) || empty($salary) || empty($bank_id) || empty($bank_account) || empty($job_group)) {
-        $_SESSION['flash_message'] = "All required fields must be filled.";
-        $_SESSION['flash_type'] = "danger";
-        header("Location: payroll_management.php");
-        exit();
-    }
-    if (!in_array($employment_type, $valid_employment_types)) {
-        $_SESSION['flash_message'] = "Invalid employment type.";
-        $_SESSION['flash_type'] = "danger";
-        header("Location: payroll_management.php");
-        exit();
-    }
-    if (!in_array($status, $valid_statuses)) {
-        $_SESSION['flash_message'] = "Invalid status.";
-        $_SESSION['flash_type'] = "danger";
-        header("Location: payroll_management.php");
-        exit();
-    }
-
-    // Fetch scale_id from salary_bands
-    $sql = "SELECT scale_id FROM salary_bands WHERE scale_id = ?";
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("s", $job_group);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    if ($result->num_rows == 0) {
-        $stmt->close();
-        $_SESSION['flash_message'] = "Invalid job group. Please select a valid job group.";
-        $_SESSION['flash_type'] = "danger";
-        header("Location: payroll_management.php");
-        exit();
-    }
-    $row = $result->fetch_assoc();
-    $scale_id = $row['scale_id'];
-    $stmt->close();
-
-    // Begin transaction
-    $conn->begin_transaction();
-    try {
-        // Update payroll table
-        // Update payroll table
-$sql = "UPDATE payroll SET 
-        employment_type = ?, 
-        status = ?, 
-        salary = ?, 
-        bank_id = ?, 
-        bank_account = ?, 
-        job_group = ?, 
-        SHA_number = NULLIF(?, ''), 
-        KRA_pin = NULLIF(?, ''), 
-        NSSF = NULLIF(?, ''), 
-        Gross_pay = NULLIF(?, ''), 
-        net_pay = NULLIF(?, '') 
-        WHERE payroll_id = ?";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param("ssdsssssssds", $employment_type, $status, $salary, $bank_id, $bank_account, $job_group, $sha_number, $kra_pin, $nssf, $gross_pay, $net_pay, $payroll_id);
-if (!$stmt->execute()) {
-    throw new Exception("Error updating payroll table: " . $stmt->error);
-}
-$stmt->close();
-        // Update employees table
-        $sql = "UPDATE employees SET 
-                employment_type = ?, 
-                job_group = ?, 
-                scale_id = ?, 
-                updated_at = NOW() 
-                WHERE id = ?";
-        $stmt = $conn->prepare($sql);
-        $stmt->bind_param("ssss", $employment_type, $job_group, $scale_id, $emp_id);
-        if (!$stmt->execute()) {
-            throw new Exception("Error updating employees table: " . $stmt->error);
-        }
-        $stmt->close();
-
-        // Commit transaction
-        $conn->commit();
-        $_SESSION['flash_message'] = "Payroll and employee records updated successfully";
+    $payroll_id = $conn->real_escape_string($_POST['payroll_id']);
+    $employment_type = $conn->real_escape_string($_POST['employment_type']);
+    $status = $conn->real_escape_string($_POST['status']);
+    $salary = $conn->real_escape_string($_POST['salary']);
+    $bank_id = $conn->real_escape_string($_POST['bank_id']);
+    $bank_account = $conn->real_escape_string($_POST['bank_account']);
+    $job_group = $conn->real_escape_string($_POST['job_group']);
+    $sha_number = $conn->real_escape_string($_POST['sha_number'] ?? '');
+    $kra_pin = $conn->real_escape_string($_POST['kra_pin'] ?? '');
+    $nssf = $conn->real_escape_string($_POST['nssf'] ?? '');
+    $gross_pay = $conn->real_escape_string($_POST['gross_pay'] ?? '');
+    $net_pay = $conn->real_escape_string($_POST['net_pay'] ?? '');
+    
+    $updateQuery = "UPDATE payroll SET 
+                    employment_type = '$employment_type',
+                    status = '$status',
+                    salary = '$salary',
+                    bank_id = '$bank_id',
+                    bank_account = '$bank_account',
+                    job_group = '$job_group',
+                    SHA_number = NULLIF('$sha_number', ''),
+                    KRA_pin = NULLIF('$kra_pin', ''),
+                    NSSF = NULLIF('$nssf', ''),
+                    Gross_pay = NULLIF('$gross_pay', ''),
+                    net_pay = NULLIF('$net_pay', '')
+                    WHERE payroll_id = '$payroll_id'";
+    
+    if ($conn->query($updateQuery)) {
+        $_SESSION['flash_message'] = "Payroll record updated successfully";
         $_SESSION['flash_type'] = "success";
         header("Location: payroll_management.php");
         exit();
-    } catch (Exception $e) {
-        // Rollback on error
-        $conn->rollback();
-        $_SESSION['flash_message'] = "Error updating records: " . $e->getMessage();
+    } else {
+        $_SESSION['flash_message'] = "Error updating record: " . $conn->error;
         $_SESSION['flash_type'] = "danger";
-        header("Location: payroll_management.php");
-        exit();
     }
 }
 
@@ -213,16 +138,6 @@ $banksResult = $conn->query($banksQuery);
 if ($banksResult && $banksResult->num_rows > 0) {
     while ($bank = $banksResult->fetch_assoc()) {
         $banks[$bank['bank_id']] = $bank['bank_name'];
-    }
-}
-
-// Fetch all job groups for the dropdown
-$job_groups = [];
-$jobGroupsQuery = "SELECT scale_id FROM salary_bands ORDER BY scale_id";
-$jobGroupsResult = $conn->query($jobGroupsQuery);
-if ($jobGroupsResult && $jobGroupsResult->num_rows > 0) {
-    while ($job_group = $jobGroupsResult->fetch_assoc()) {
-        $job_groups[$job_group['scale_id']] = $job_group['scale_id'];
     }
 }
 
@@ -294,6 +209,8 @@ if ($result) {
 
 // Close connection
 $conn->close();
+include 'header.php';
+include 'nav_bar.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -557,56 +474,22 @@ $conn->close();
 </head>
 <body>
     <div class="container">
-        <!-- Sidebar -->
-        <div class="sidebar">
-            <div class="sidebar-brand">
-                <h1>HR System</h1>
-                <p>Management Portal</p>
-            </div>
-            <nav class="nav">
-                <ul>
-                    <li><a href="dashboard.php">Dashboard</a></li>
-                    <li><a href="employees.php">Employees</a></li>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="departments.php">Departments</a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('super_admin')): ?>
-                    <li><a href="admin.php?tab=users">Admin</a></li>
-                    <?php elseif (hasPermission('hr_manager')): ?>
-                    <li><a href="admin.php?tab=financial">Admin</a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="reports.php">Reports</a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('hr_manager') || hasPermission('super_admin') || hasPermission('dept_head') || hasPermission('officer')): ?>
-                    <li><a href="leave_management.php">Leave Management</a></li>
-                    <?php endif; ?>
-                    <li><a href="employee_appraisal.php">Performance Appraisal</a></li>
-                    <li><a href="payroll_management.php" class="active">Payroll</a></li>
-                </ul>
-            </nav>
-        </div>
+       
 
         <!-- Main Content -->
         <div class="main-content">
-            <div class="header">
-                <h1>Payroll Management</h1>
-                <div class="user-info">
-                    <span>Welcome, <?php echo htmlspecialchars($user['first_name'] . ' ' . $user['last_name']); ?></span>
-                    <span class="badge badge-info"><?php echo ucwords(str_replace('_', ' ', $user['role'])); ?></span>
-                    <a href="logout.php" class="btn btn-secondary btn-sm">Logout</a>
-                </div>
-            </div>
-
             <div class="content">
                 <!-- Tabs Navigation -->
-                <div class="tabs">
-                    <a href="payroll_management.php" class="active">Payroll Management</a>
+                < <div class="tabs">
+                    <a href="payroll_management.php">Payroll Management</a>
+                    <a href="process_payroll.php" class="active">Process Payroll</a>
                     <a href="deductions.php">Deductions</a>
                     <a href="allowances.php">Allowances</a>
-                    <a href="add_bank.php">Add Banks</a>
+                    <a href="loans.php">Loans</a>
                     <a href="periods.php">Periods</a>
-                    <a href="mp_profile.php">MP Profile</a>
+                    <a href="loans.php">Reports</a>
+                    <A href="process_payroll.php">Reports</A>
+
                 </div>
 
                 <?php $flash = getFlashMessage(); if ($flash): ?>
@@ -680,7 +563,6 @@ $conn->close();
                                     <td>
                                         <button class="btn btn-sm btn-primary edit-btn" 
                                                 data-id="<?php echo $record['payroll_id']; ?>" 
-                                                data-emp-id="<?php echo $record['emp_id']; ?>" 
                                                 data-employment-type="<?php echo htmlspecialchars($record['employment_type'] ?? ''); ?>"
                                                 data-status="<?php echo htmlspecialchars($record['status'] ?? ''); ?>"
                                                 data-salary="<?php echo htmlspecialchars($record['salary'] ?? ''); ?>"
@@ -739,7 +621,6 @@ $conn->close();
                 <form method="POST" action="payroll_management.php">
                     <div class="modal-body">
                         <input type="hidden" name="payroll_id" id="edit_payroll_id">
-                        <input type="hidden" name="emp_id" id="edit_emp_id">
                         <input type="hidden" name="update_payroll" value="1">
                         
                         <div class="form-group">
@@ -766,16 +647,6 @@ $conn->close();
                         </div>
                         
                         <div class="form-group">
-                            <label class="form-label" for="edit_job_group">Job Group</label>
-                            <select class="form-control" id="edit_job_group" name="job_group" required>
-                                <option value="">Select Job Group</option>
-                                <?php foreach ($job_groups as $id => $name): ?>
-                                    <option value="<?php echo htmlspecialchars($id); ?>"><?php echo htmlspecialchars($name); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-
-                        <div class="form-group">
                             <label class="form-label" for="edit_salary">Salary</label>
                             <input type="number" step="0.01" class="form-control" id="edit_salary" name="salary" required>
                         </div>
@@ -785,7 +656,7 @@ $conn->close();
                             <select class="form-control" id="edit_bank_id" name="bank_id" required>
                                 <option value="">Select Bank</option>
                                 <?php foreach ($banks as $id => $name): ?>
-                                    <option value="<?php echo htmlspecialchars($id); ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
@@ -793,6 +664,11 @@ $conn->close();
                         <div class="form-group">
                             <label class="form-label" for="edit_bank_account">Bank Account</label>
                             <input type="text" class="form-control" id="edit_bank_account" name="bank_account" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label class="form-label" for="edit_job_group">Job Group</label>
+                            <input type="text" class="form-control" id="edit_job_group" name="job_group" required>
                         </div>
                         
                         <div class="form-group">
@@ -854,7 +730,6 @@ $conn->close();
         document.querySelectorAll('.edit-btn').forEach(button => {
             button.addEventListener('click', function() {
                 const payrollId = this.getAttribute('data-id');
-                const empId = this.getAttribute('data-emp-id');
                 const name = this.getAttribute('data-name');
                 const employmentType = this.getAttribute('data-employment-type');
                 const status = this.getAttribute('data-status');
@@ -869,7 +744,6 @@ $conn->close();
                 const netPay = this.getAttribute('data-net-pay');
                 
                 document.getElementById('edit_payroll_id').value = payrollId;
-                document.getElementById('edit_emp_id').value = empId;
                 document.getElementById('edit_name').value = name;
                 document.getElementById('edit_employment_type').value = employmentType;
                 document.getElementById('edit_status').value = status;

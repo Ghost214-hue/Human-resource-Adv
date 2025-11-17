@@ -1,16 +1,26 @@
+<?php require_once 'auth.php'; ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>MUWASCO HR System</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
-      <div class="sidebar">
-            <div class="sidebar-brand">
-                <h1>HR System</h1>
-                <p>Management Portal</p>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-brand">
+                    <div class="logo-container">
+                        <img src="muwascologo.png" alt="MUWASCO Logo" class="muwasco-logo">
+                    </div>
+                </div>
+                <!-- Close button for mobile - positioned at top right -->
+                <button class="sidebar-close" onclick="toggleSidebar()" aria-label="Close sidebar">
+                    <i class="fas fa-times"></i>
+                </button>
             </div>
             <nav class="nav">
                 <ul>
@@ -49,14 +59,20 @@
                         <i class="fas fa-calendar-alt"></i> Leave Management
                     </a></li>
                     <?php endif; ?>
-                    <li><a href="strategic_plan.php?tab=strategic_plan">
+                    <li><a href="strategic_plan.php?tab=goals">
                         <i class="fas fa-star"></i> Performance Management
                     </a></li>
                     <li><a href="payroll_management.php">
                         <i class="fas fa-money-check"></i> Payroll
                     </a></li>
+                    <li><a href="attendance.php">
+                        <i class="fas fa-sign-out-alt"></i> Attendance
+                    </a></li>
                 </ul>
             </nav>
         </div>
+        
+        <!-- Add overlay for mobile -->
+        <div class="sidebar-overlay"></div>
 </body>
 </html>

@@ -2,22 +2,23 @@
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
+ob_start();
 
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'header.php';
 require_once 'config.php';
 $conn = getConnection();
-
-function hasPermission($role) {
-    if (!isset($_SESSION['user_role'])) {
-        return false;
-    }
-
-    return $_SESSION['user_role'] === $role || 
-           (is_array($_SESSION['user_role']) && in_array($role, $_SESSION['user_role']));
-}
 
 $user = [
     'first_name' => isset($_SESSION['user_name']) ? explode(' ', $_SESSION['user_name'])[0] : 'User',
@@ -25,6 +26,12 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
+
+if (!(hasPermission('hr_manager') || hasPermission('super_admin'))) {
+    header("Location: dashboard.php");
+    exit();
+}
+
 
 function setFlashMessage($message, $type = 'success') {
     $_SESSION['flash'] = ['message' => $message, 'type' => $type];
@@ -125,7 +132,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($employeeCount > 0) {
                     $error = 'Cannot delete department: It has ' . $employeeCount . ' employees assigned to it.';
                 } else {
-                    // Delete sections first
+                    // Delete sub-sections first
+                    $stmt = $conn->prepare("DELETE FROM subsections WHERE department_id = ?");
+                    $stmt->bind_param("i", $id);
+                    $stmt->execute();
+                    $stmt->close();
+                    
+                    // Delete sections
                     $stmt = $conn->prepare("DELETE FROM sections WHERE department_id = ?");
                     $stmt->bind_param("i", $id);
                     $stmt->execute();
@@ -145,7 +158,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $id = (int)$_POST['id'];
             
             try {
-                // Check if section has employees - Fixed query to check sections table
+                // Check if section has employees
                 $stmt = $conn->prepare("SELECT COUNT(*) FROM employees WHERE section_id = ?");
                 $stmt->bind_param("i", $id);
                 $stmt->execute();
@@ -156,6 +169,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($employeeCount > 0) {
                     $error = 'Cannot delete section: It has ' . $employeeCount . ' employees assigned to it.';
                 } else {
+                    // Delete sub-sections first
+                    $stmt = $conn->prepare("DELETE FROM subsections WHERE section_id = ?");
+                    $stmt->bind_param("i", $id);
+                    $stmt->execute();
+                    $stmt->close();
+                    
+                    // Delete section
                     $stmt = $conn->prepare("DELETE FROM sections WHERE id = ?");
                     $stmt->bind_param("i", $id);
                     $stmt->execute();
@@ -165,20 +185,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Exception $e) {
                 $error = 'Error deleting section: ' . $e->getMessage();
             }
+        } elseif ($action === 'add_subsection' && (hasPermission('hr_manager') || hasPermission('super_admin'))) {
+            $name = sanitizeInput($_POST['subsection_name']);
+            $description = sanitizeInput($_POST['subsection_description']);
+            $department_id = (int)$_POST['department_id'];
+            $section_id = (int)$_POST['section_id'];
+            
+            try {
+                $stmt = $conn->prepare("INSERT INTO subsections (name, description, department_id, section_id) VALUES (?, ?, ?, ?)");
+                $stmt->bind_param("ssii", $name, $description, $department_id, $section_id);
+                $stmt->execute();
+                $stmt->close();
+                redirectWithMessage('departments.php', 'Sub-section added successfully!', 'success');
+            } catch (Exception $e) {
+                $error = 'Error adding sub-section: ' . $e->getMessage();
+            }
+        } elseif ($action === 'edit_subsection' && (hasPermission('hr_manager') || hasPermission('super_admin'))) {
+            $id = (int)$_POST['subsection_id'];
+            $name = sanitizeInput($_POST['subsection_name']);
+            $description = sanitizeInput($_POST['subsection_description']);
+            $department_id = (int)$_POST['department_id'];
+            $section_id = (int)$_POST['section_id'];
+            
+            try {
+                $stmt = $conn->prepare("UPDATE subsections SET name=?, description=?, department_id=?, section_id=?, updated_at=NOW() WHERE id=?");
+                $stmt->bind_param("ssiii", $name, $description, $department_id, $section_id, $id);
+                $stmt->execute();
+                $stmt->close();
+                redirectWithMessage('departments.php', 'Sub-section updated successfully!', 'success');
+            } catch (Exception $e) {
+                $error = 'Error updating sub-section: ' . $e->getMessage();
+            }
+        } elseif ($action === 'delete_subsection' && (hasPermission('hr_manager')|| hasPermission('super_admin'))) {
+            $id = (int)$_POST['id'];
+            
+            try {
+                // Check if sub-section has employees
+                $stmt = $conn->prepare("SELECT COUNT(*) FROM employees WHERE subsection_id = ?");
+                $stmt->bind_param("i", $id);
+                $stmt->execute();
+                $stmt->bind_result($employeeCount);
+                $stmt->fetch();
+                $stmt->close();
+                
+                if ($employeeCount > 0) {
+                    $error = 'Cannot delete sub-section: It has ' . $employeeCount . ' employees assigned to it.';
+                } else {
+                    $stmt = $conn->prepare("DELETE FROM subsections WHERE id = ?");
+                    $stmt->bind_param("i", $id);
+                    $stmt->execute();
+                    $stmt->close();
+                    redirectWithMessage('departments.php', 'Sub-section deleted successfully!', 'success');
+                }
+            } catch (Exception $e) {
+                $error = 'Error deleting sub-section: ' . $e->getMessage();
+            }
         }
     }
 }
 
-// Get departments and sections with proper error handling
+// Get departments, sections, and sub-sections with proper error handling
 try {
     $departments_result = $conn->query("SELECT * FROM departments ORDER BY name");
     $departments = $departments_result ? $departments_result->fetch_all(MYSQLI_ASSOC) : [];
     
     $sections_result = $conn->query("SELECT s.*, d.name as department_name FROM sections s LEFT JOIN departments d ON s.department_id = d.id ORDER BY d.name, s.name");
     $sections = $sections_result ? $sections_result->fetch_all(MYSQLI_ASSOC) : [];
+    
+    $subsections_result = $conn->query("SELECT ss.*, s.name as section_name, d.name as department_name 
+                                       FROM subsections ss 
+                                       LEFT JOIN sections s ON ss.section_id = s.id 
+                                       LEFT JOIN departments d ON ss.department_id = d.id 
+                                       ORDER BY d.name, s.name, ss.name");
+    $subsections = $subsections_result ? $subsections_result->fetch_all(MYSQLI_ASSOC) : [];
 } catch (Exception $e) {
     $departments = [];
     $sections = [];
+    $subsections = [];
     $error = 'Error fetching data: ' . $e->getMessage();
 }
 include 'nav_bar.php';
@@ -191,14 +274,12 @@ include 'nav_bar.php';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Departments - HR Management System</title>
     <link rel="stylesheet" href="style.css">
+
 </head>
 <body>
    <div class="container">
-      
-        
         <!-- Main Content Area -->
         <div class="main-content">
-            
             <!-- Content -->
             <div class="content">
                 <?php $flash = getFlashMessage(); if ($flash): ?>
@@ -207,17 +288,19 @@ include 'nav_bar.php';
                     </div>
                 <?php endif; ?>
                 
-                
                 <?php if (isset($error)): ?>
                     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
                 <?php endif; ?>
-                
-                <!-- Departments Section -->
-                <div style="margin-bottom: 40px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                        <h2>Departments (<?php echo count($departments); ?>)</h2>
+
+                <!-- Departments Table -->
+                <div class="section-container">
+                    <div class="section-header">
+                        <div>
+                            <span class="section-title">Departments</span>
+                            <span class="count-badge"><?php echo count($departments); ?> items</span>
+                        </div>
                         <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
-                            <button onclick="showAddDepartmentModal()" class="btn btn-success">Add New Department</button>
+                            <button onclick="showAddDepartmentModal()" class="btn btn-success">Add Department</button>
                         <?php endif; ?>
                     </div>
                     
@@ -228,31 +311,20 @@ include 'nav_bar.php';
                                     <th>ID</th>
                                     <th>Name</th>
                                     <th>Description</th>
-                                    <th>Sections</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php if (empty($departments)): ?>
                                     <tr>
-                                        <td colspan="5" class="text-center">No departments found</td>
+                                        <td colspan="4" class="text-center">No departments found</td>
                                     </tr>
                                 <?php else: ?>
                                     <?php foreach ($departments as $department): ?>
-                                    <?php 
-                                        $dept_sections = array_filter($sections, function($s) use ($department) {
-                                            return $s['department_id'] == $department['id'];
-                                        });
-                                    ?>
                                     <tr>
                                         <td><?php echo htmlspecialchars($department['id']); ?></td>
                                         <td><?php echo htmlspecialchars($department['name']); ?></td>
                                         <td><?php echo htmlspecialchars($department['description'] ?? 'N/A'); ?></td>
-                                        <td>
-                                            <button onclick="showSections(<?php echo $department['id']; ?>)" class="btn btn-sm btn-info">
-                                                View (<?php echo count($dept_sections); ?>)
-                                            </button>
-                                        </td>
                                         <td>
                                             <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
                                                 <button onclick="showEditDepartmentModal(<?php echo htmlspecialchars(json_encode($department)); ?>)" class="btn btn-sm btn-primary">Edit</button>
@@ -269,12 +341,15 @@ include 'nav_bar.php';
                     </div>
                 </div>
 
-                <!-- Sections Section -->
-                <div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                        <h2>Sections (<?php echo count($sections); ?>)</h2>
+                <!-- Sections Table -->
+                <div class="section-container">
+                    <div class="section-header">
+                        <div>
+                            <span class="section-title">Sections</span>
+                            <span class="count-badge"><?php echo count($sections); ?> items</span>
+                        </div>
                         <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
-                            <button onclick="showAddSectionModal()" class="btn btn-success">Add New Section</button>
+                            <button onclick="showAddSectionModal()" class="btn btn-success">Add Section</button>
                         <?php endif; ?>
                     </div>
                     
@@ -283,7 +358,7 @@ include 'nav_bar.php';
                             <thead>
                                 <tr>
                                     <th>ID</th>
-                                    <th>Section Name</th>
+                                    <th>Name</th>
                                     <th>Department</th>
                                     <th>Description</th>
                                     <th>Actions</th>
@@ -305,6 +380,59 @@ include 'nav_bar.php';
                                             <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
                                                 <button onclick="showEditSectionModal(<?php echo htmlspecialchars(json_encode($section)); ?>)" class="btn btn-sm btn-primary">Edit</button>
                                                 <button onclick="confirmDeleteSection(<?php echo $section['id']; ?>, '<?php echo htmlspecialchars($section['name']); ?>')" class="btn btn-sm btn-danger ml-1">Delete</button>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Sub-sections Table -->
+                <div class="section-container">
+                    <div class="section-header">
+                        <div>
+                            <span class="section-title">Sub-sections</span>
+                            <span class="count-badge"><?php echo count($subsections); ?> items</span>
+                        </div>
+                        <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
+                            <button onclick="showAddSubsectionModal()" class="btn btn-success">Add Sub-section</button>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div class="table-container">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Section</th>
+                                    <th>Department</th>
+                                    <th>Description</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (empty($subsections)): ?>
+                                    <tr>
+                                        <td colspan="6" class="text-center">No sub-sections found</td>
+                                    </tr>
+                                <?php else: ?>
+                                    <?php foreach ($subsections as $subsection): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($subsection['id']); ?></td>
+                                        <td><?php echo htmlspecialchars($subsection['name']); ?></td>
+                                        <td><?php echo htmlspecialchars($subsection['section_name'] ?? 'N/A'); ?></td>
+                                        <td><?php echo htmlspecialchars($subsection['department_name'] ?? 'N/A'); ?></td>
+                                        <td><?php echo htmlspecialchars($subsection['description'] ?? 'N/A'); ?></td>
+                                        <td>
+                                            <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')): ?>
+                                                <button onclick="showEditSubsectionModal(<?php echo htmlspecialchars(json_encode($subsection)); ?>)" class="btn btn-sm btn-primary">Edit</button>
+                                                <button onclick="confirmDeleteSubsection(<?php echo $subsection['id']; ?>, '<?php echo htmlspecialchars($subsection['name']); ?>')" class="btn btn-sm btn-danger ml-1">Delete</button>
                                             <?php else: ?>
                                                 <span class="text-muted">-</span>
                                             <?php endif; ?>
@@ -454,6 +582,99 @@ include 'nav_bar.php';
             </form>
         </div>
     </div>
+
+    <!-- Add Sub-section Modal -->
+    <div id="addSubsectionModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add New Sub-section</h3>
+                <span class="close" onclick="hideAddSubsectionModal()">&times;</span>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="add_subsection">
+                
+                <div class="form-group">
+                    <label for="subsection_department_id">Department</label>
+                    <select class="form-control" id="subsection_department_id" name="department_id" required onchange="updateSectionDropdown(this.value)">
+                        <option value="">Select Department</option>
+                        <?php foreach ($departments as $dept): ?>
+                            <option value="<?php echo $dept['id']; ?>"><?php echo htmlspecialchars($dept['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="subsection_section_id">Section</label>
+                    <select class="form-control" id="subsection_section_id" name="section_id" required>
+                        <option value="">Select Section</option>
+                        <!-- Sections will be populated dynamically -->
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="subsection_name">Sub-section Name</label>
+                    <input type="text" class="form-control" id="subsection_name" name="subsection_name" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="subsection_description">Description</label>
+                    <textarea class="form-control" id="subsection_description" name="subsection_description" rows="3"></textarea>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-success">Add Sub-section</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideAddSubsectionModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Sub-section Modal -->
+    <div id="editSubsectionModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Edit Sub-section</h3>
+                <span class="close" onclick="hideEditSubsectionModal()">&times;</span>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="edit_subsection">
+                <input type="hidden" id="edit_subsection_id" name="subsection_id">
+                
+                <div class="form-group">
+                    <label for="edit_subsection_department_id">Department</label>
+                    <select class="form-control" id="edit_subsection_department_id" name="department_id" required onchange="updateEditSectionDropdown(this.value)">
+                        <option value="">Select Department</option>
+                        <?php foreach ($departments as $dept): ?>
+                            <option value="<?php echo $dept['id']; ?>"><?php echo htmlspecialchars($dept['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_subsection_section_id">Section</label>
+                    <select class="form-control" id="edit_subsection_section_id" name="section_id" required>
+                        <option value="">Select Section</option>
+                        <!-- Sections will be populated dynamically -->
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_subsection_name">Sub-section Name</label>
+                    <input type="text" class="form-control" id="edit_subsection_name" name="subsection_name" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_subsection_description">Description</label>
+                    <textarea class="form-control" id="edit_subsection_description" name="subsection_description" rows="3"></textarea>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Update Sub-section</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideEditSubsectionModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
     <?php endif; ?>
 
     <script>
@@ -497,33 +718,70 @@ include 'nav_bar.php';
         function hideEditSectionModal() {
             document.getElementById('editSectionModal').style.display = 'none';
         }
-        
-        function showSections(departmentId) {
-            // Scroll to sections table and highlight sections for this department
-            const sectionsTable = document.querySelector('.table tbody');
-            const rows = sectionsTable.querySelectorAll('tr');
-            
-            // Remove any existing highlights
-            rows.forEach(row => row.classList.remove('highlight'));
-            
-            // Highlight matching sections
-            const sections = <?php echo json_encode($sections); ?>;
-            sections.forEach((section, index) => {
-                if (section.department_id == departmentId) {
-                    const row = rows[index];
-                    if (row) {
-                        row.classList.add('highlight');
-                        setTimeout(() => row.classList.remove('highlight'), 3000);
-                    }
-                }
-            });
-            
-            // Scroll to sections table
-            document.querySelector('h2:last-of-type').scrollIntoView({ behavior: 'smooth' });
+
+        // Sub-section Modal Functions
+        function showAddSubsectionModal() {
+            document.getElementById('addSubsectionModal').style.display = 'block';
         }
         
+        function hideAddSubsectionModal() {
+            document.getElementById('addSubsectionModal').style.display = 'none';
+        }
+        
+        function showEditSubsectionModal(subsection) {
+            document.getElementById('edit_subsection_id').value = subsection.id;
+            document.getElementById('edit_subsection_name').value = subsection.name;
+            document.getElementById('edit_subsection_description').value = subsection.description || '';
+            document.getElementById('edit_subsection_department_id').value = subsection.department_id;
+            updateEditSectionDropdown(subsection.department_id, subsection.section_id);
+            document.getElementById('editSubsectionModal').style.display = 'block';
+        }
+        
+        function hideEditSubsectionModal() {
+            document.getElementById('editSubsectionModal').style.display = 'none';
+        }
+
+        // Update section dropdown based on department selection
+        function updateSectionDropdown(departmentId) {
+            const sectionSelect = document.getElementById('subsection_section_id');
+            sectionSelect.innerHTML = '<option value="">Select Section</option>';
+            
+            if (departmentId) {
+                const sections = <?php echo json_encode($sections); ?>;
+                const departmentSections = sections.filter(section => section.department_id == departmentId);
+                
+                departmentSections.forEach(section => {
+                    const option = document.createElement('option');
+                    option.value = section.id;
+                    option.textContent = section.name;
+                    sectionSelect.appendChild(option);
+                });
+            }
+        }
+
+        function updateEditSectionDropdown(departmentId, selectedSectionId = null) {
+            const sectionSelect = document.getElementById('edit_subsection_section_id');
+            sectionSelect.innerHTML = '<option value="">Select Section</option>';
+            
+            if (departmentId) {
+                const sections = <?php echo json_encode($sections); ?>;
+                const departmentSections = sections.filter(section => section.department_id == departmentId);
+                
+                departmentSections.forEach(section => {
+                    const option = document.createElement('option');
+                    option.value = section.id;
+                    option.textContent = section.name;
+                    if (selectedSectionId && section.id == selectedSectionId) {
+                        option.selected = true;
+                    }
+                    sectionSelect.appendChild(option);
+                });
+            }
+        }
+
+        // Delete confirmation functions
         function confirmDeleteDepartment(id, name) {
-            if (confirm('Are you sure you want to delete the department "' + name + '"?\n\nThis will also delete all sections in this department.\nThis action cannot be undone.')) {
+            if (confirm('Are you sure you want to delete the department "' + name + '"?\n\nThis will also delete all sections and sub-sections in this department.\nThis action cannot be undone.')) {
                 const form = document.createElement('form');
                 form.method = 'POST';
                 form.innerHTML = '<input type="hidden" name="action" value="delete_department"><input type="hidden" name="id" value="' + id + '">';
@@ -533,7 +791,7 @@ include 'nav_bar.php';
         }
         
         function confirmDeleteSection(id, name) {
-            if (confirm('Are you sure you want to delete the section "' + name + '"?\n\nThis action cannot be undone.')) {
+            if (confirm('Are you sure you want to delete the section "' + name + '"?\n\nThis will also delete all sub-sections in this section.\nThis action cannot be undone.')) {
                 const form = document.createElement('form');
                 form.method = 'POST';
                 form.innerHTML = '<input type="hidden" name="action" value="delete_section"><input type="hidden" name="id" value="' + id + '">';
@@ -542,9 +800,19 @@ include 'nav_bar.php';
             }
         }
         
+        function confirmDeleteSubsection(id, name) {
+            if (confirm('Are you sure you want to delete the sub-section "' + name + '"?\n\nThis action cannot be undone.')) {
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.innerHTML = '<input type="hidden" name="action" value="delete_subsection"><input type="hidden" name="id" value="' + id + '">';
+                document.body.appendChild(form);
+                form.submit();
+            }
+        }
+        
         // Close modals when clicking outside
         window.onclick = function(event) {
-            const modals = ['addDepartmentModal', 'editDepartmentModal', 'addSectionModal', 'editSectionModal'];
+            const modals = ['addDepartmentModal', 'editDepartmentModal', 'addSectionModal', 'editSectionModal', 'addSubsectionModal', 'editSubsectionModal'];
             modals.forEach(modalId => {
                 const modal = document.getElementById(modalId);
                 if (event.target == modal) {
@@ -553,19 +821,8 @@ include 'nav_bar.php';
             });
         }
     </script>
-
-    <style>
-        .highlight {
-            background-color: #fff3cd !important;
-            transition: background-color 0.3s ease;
-        }
-        .ml-1 {
-            margin-left: 5px;
-        }
-        .btn-sm {
-            padding: 4px 8px;
-            font-size: 12px;
-        }
-    </style>
 </body>
 </html>
+<?php
+ob_end_flush();
+?>

@@ -3,12 +3,21 @@ ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
-require_once 'vendor/autoload.php';
-use Dompdf\Dompdf;
-
+// Start session at the very beginning
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
+
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id']) && isset($_SESSION['user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'] ?? '';
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'] ?? '';
+}
+
+require_once 'auth_check.php';
+require_once 'vendor/autoload.php';
+use Dompdf\Dompdf;
 
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
@@ -17,63 +26,37 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 require_once 'config.php';
+require_once 'auth.php';
 $conn = getConnection();
-
-// Get current user from session
-$user = [
-    'first_name' => isset($_SESSION['user_name']) ? explode(' ', $_SESSION['user_name'])[0] : 'User',
-    'last_name' => isset($_SESSION['user_name']) ? (explode(' ', $_SESSION['user_name'])[1] ?? '') : '',
-    'role' => $_SESSION['user_role'] ?? 'guest',
-    'id' => $_SESSION['user_id'],
-    'employee_id' => $_SESSION['employee_id'] ?? null
-];
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' => 4,
-        'managing_director' => 3,
-        'dept_head' => 2,
-        'section_head' => 1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
 
 // Get current user's employee record
 $userEmployeeQuery = "SELECT e.* FROM employees e 
                      LEFT JOIN users u ON u.employee_id = e.employee_id 
                      WHERE u.id = ?";
 $stmt = $conn->prepare($userEmployeeQuery);
-$stmt->bind_param("i", $user['id']);
+$stmt->bind_param("i", $_SESSION['user_id']);
 $stmt->execute();
 $currentEmployee = $stmt->get_result()->fetch_assoc();
 
-// Export functions
+// Export functions with centered logo
 function exportToPDF($appraisal, $scores, $totalScore) {
     $html = generateAppraisalHTML($appraisal, $scores, $totalScore);
     
     $dompdf = new Dompdf();
     $dompdf->loadHtml($html);
     $dompdf->setPaper('A4', 'portrait');
+    
+    // Set options for better image handling
+    $dompdf->set_option('isRemoteEnabled', true);
+    $dompdf->set_option('defaultFont', 'Arial');
+    
     $dompdf->render();
-    $dompdf->stream("appraisal_" . $appraisal['emp_id'] . "_" . date('Y-m-d') . ".pdf", ["Attachment" => true]);
-    exit();
-}
-
-function exportToPrint($appraisal, $scores, $totalScore) {
-    $html = generateAppraisalHTML($appraisal, $scores, $totalScore);
-    // Add print script
-    $html = str_replace('</body>', '<script>window.print();</script></body>', $html);
-    echo $html;
+    
+    // Output the PDF
+    $dompdf->stream("MUWASCO_Appraisal_" . $appraisal['emp_id'] . "_" . date('Y-m-d') . ".pdf", [
+        "Attachment" => true,
+        "compress" => true
+    ]);
     exit();
 }
 
@@ -88,7 +71,7 @@ function exportToWord($appraisal, $scores, $totalScore) {
     
     // Set proper headers for Word document
     header("Content-Type: application/vnd.ms-word; charset=utf-8");
-    header("Content-Disposition: attachment; filename=appraisal_" . $appraisal['emp_id'] . "_" . date('Y-m-d') . ".doc");
+    header("Content-Disposition: attachment; filename=MUWASCO_Appraisal_" . $appraisal['emp_id'] . "_" . date('Y-m-d') . ".doc");
     header("Cache-Control: no-cache, no-store, must-revalidate");
     header("Pragma: no-cache");
     header("Expires: 0");
@@ -100,7 +83,15 @@ function exportToWord($appraisal, $scores, $totalScore) {
     exit();
 }
 
-// Improved HTML generation function with supervisor comments and better formatting
+function exportToPrint($appraisal, $scores, $totalScore) {
+    $html = generateAppraisalHTML($appraisal, $scores, $totalScore);
+    // Add print script
+    $html = str_replace('</body>', '<script>window.onload = function() { window.print(); }</script></body>', $html);
+    echo $html;
+    exit();
+}
+
+// Improved HTML generation function with centered logo
 function generateAppraisalHTML($appraisal, $scores, $totalScore) {
     // Ensure all variables are properly escaped
     $employee_name = htmlspecialchars($appraisal['first_name'] . ' ' . $appraisal['last_name']);
@@ -110,10 +101,25 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
     $section = htmlspecialchars($appraisal['section_name'] ?? 'N/A');
     $appraiser_name = htmlspecialchars($appraisal['appraiser_first_name'] . ' ' . $appraisal['appraiser_last_name']);
     
+    // Logo handling - try base64 first, then fallback to URL
+    $logo_html = '';
+    $logo_file_path = $_SERVER['DOCUMENT_ROOT'] . dirname($_SERVER['PHP_SELF']) . '/muwascologo.png';
+    
+    if (file_exists($logo_file_path)) {
+        // Use base64 encoded image for better compatibility
+        $logo_data = base64_encode(file_get_contents($logo_file_path));
+        $logo_html = '<img src="data:image/png;base64,' . $logo_data . '" alt="MUWASCO Logo" style="height: 80px; width: auto; display: block; margin: 0 auto;">';
+    } else {
+        // Fallback to URL
+        $base_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://$_SERVER[HTTP_HOST]";
+        $logo_path = $base_url . dirname($_SERVER['PHP_SELF']) . '/muwascologo.png';
+        $logo_html = '<img src="' . $logo_path . '" alt="MUWASCO Logo" style="height: 80px; width: auto; display: block; margin: 0 auto;">';
+    }
+    
     $html = '<!DOCTYPE html>
 <html>
 <head>
-    <title>Performance Appraisal Report</title>
+    <title>Performance Appraisal Report - MUWASCO</title>
     <meta charset="utf-8">
     <style>
         body { 
@@ -124,26 +130,53 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
             font-size: 12px;
         }
         .header { 
-            text-align: center; 
+            text-align: center;
             margin-bottom: 20px; 
-            border-bottom: 2px solid #333;
+            border-bottom: 2px solid #2c3e50;
             padding-bottom: 15px;
+        }
+        .logo-container {
+            margin-bottom: 10px;
+        }
+        .logo {
+            height: 80px;
+            width: auto;
+            display: block;
+            margin: 0 auto;
         }
         .header h1 {
             font-size: 18px;
-            margin: 0;
+            margin: 5px 0;
+            color: #2c3e50;
+        }
+        .header h2 {
+            font-size: 16px;
+            margin: 5px 0;
+            color: #34495e;
+            font-weight: normal;
         }
         .header h3 {
             font-size: 14px;
-            margin: 5px 0 0 0;
+            margin: 5px 0;
             font-weight: normal;
+            color: #7f8c8d;
+        }
+        .company-info {
+            font-size: 10px;
+            color: #7f8c8d;
+            margin-top: 5px;
         }
         .employee-info { 
             margin-bottom: 15px; 
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            border-left: 4px solid #3498db;
         }
         .employee-info h3 {
             font-size: 14px;
             margin-bottom: 8px;
+            color: #2c3e50;
         }
         .info-table { 
             width: 100%; 
@@ -157,7 +190,8 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
             text-align: left; 
         }
         .info-table th { 
-            background-color: #f5f5f5; 
+            background-color: #3498db; 
+            color: white;
             font-weight: bold; 
             width: 25%;
         }
@@ -173,7 +207,8 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
             text-align: left; 
         }
         .scores-table th { 
-            background-color: #f5f5f5; 
+            background-color: #3498db; 
+            color: white;
             font-weight: bold; 
         }
         .total-score { 
@@ -183,18 +218,25 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
         .comments-section { 
             margin-top: 15px; 
             border: 1px solid #ddd; 
-            padding: 10px; 
+            padding: 12px; 
             background: #f9f9f9; 
             font-size: 11px;
+            border-radius: 4px;
         }
         .comments-section h3 {
             font-size: 13px;
             margin: 0 0 8px 0;
+            color: #2c3e50;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 4px;
         }
         @media print {
             body { margin: 10px; }
             .header h1 { color: #333; }
             .no-print { display: none !important; }
+            .logo {
+                height: 70px;
+            }
         }
         .footer {
             margin-top: 30px;
@@ -215,21 +257,61 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
             border: none;
             border-radius: 4px;
             cursor: pointer;
+            margin: 0 5px;
         }
         .print-buttons button.close-btn {
             background: #f44336;
-            margin-left: 10px;
+        }
+        .section-title {
+            background: #34495e;
+            color: white;
+            padding: 8px 12px;
+            margin: 15px 0 8px 0;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+        .watermark {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) rotate(-45deg);
+            font-size: 60px;
+            color: rgba(0,0,0,0.1);
+            z-index: -1;
+            pointer-events: none;
+        }
+        .document-meta {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+            font-size: 10px;
+            color: #7f8c8d;
         }
     </style>
 </head>
 <body>
+    <div class="watermark">MUWASCO</div>
+    
     <div class="header">
-        <h1>Performance Appraisal Report</h1>
+        <div class="logo-container">
+            ' . $logo_html . '
+        </div>
+        <h1>MURANGA WATER SUPPLY COMPANY LTD</h1>
+        <h2>Performance Appraisal Report</h2>
         <h3>' . $cycle_name . '</h3>
+        <div class="company-info">
+            P.O. Box 90461 - 80100, MURANGA, Kenya | Tel: +254 (0) 41 2314209 | Email: info@muwasco.co.ke
+        </div>
+        
+        <div class="document-meta">
+            <div>Employee: ' . $employee_name . ' (' . $employee_id . ')</div>
+            <div>Generated: ' . date('M d, Y H:i:s') . '</div>
+        </div>
     </div>
     
+    <div class="section-title">Employee Information</div>
     <div class="employee-info">
-        <h3>Employee Information</h3>
         <table class="info-table">
             <tr>
                 <th>Employee Name</th>
@@ -257,12 +339,12 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
             </tr>
             <tr>
                 <th>Submitted Date</th>
-                <td>' . date('M d, Y H:i', strtotime($appraisal['submitted_at'])) . '</td>
+                <td>' . ($appraisal['status'] === 'submitted' ? date('M d, Y H:i', strtotime($appraisal['submitted_at'])) : 'N/A') . '</td>
             </tr>
         </table>
     </div>
     
-    <h3 style="font-size: 14px; margin-bottom: 8px;">Performance Scores</h3>
+    <div class="section-title">Performance Scores</div>
     <table class="scores-table">
         <thead>
             <tr>
@@ -295,7 +377,7 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
     
     $html .= '
             <tr class="total-score">
-                <td colspan="3"><strong>Overall Score</strong></td>
+                <td colspan="3"><strong>Overall Performance Score</strong></td>
                 <td><strong>' . number_format($totalScore, 1) . '%</strong></td>
                 <td></td>
             </tr>
@@ -308,8 +390,8 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
         $comment_date = date('M d, Y H:i', strtotime($appraisal['employee_comment_date']));
         
         $html .= '
+        <div class="section-title">Employee Comments</div>
         <div class="comments-section">
-            <h3>Employee Comments</h3>
             <p>' . $employee_comment . '</p>
             <p><small>Commented on: ' . $comment_date . '</small></p>
         </div>';
@@ -321,8 +403,8 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
         $supervisor_comment_date = date('M d, Y H:i', strtotime($appraisal['supervisors_comment_date']));
         
         $html .= '
+        <div class="section-title">Supervisor Comments</div>
         <div class="comments-section">
-            <h3>Supervisor Comments</h3>
             <p>' . $supervisor_comment . '</p>
             <p><small>Commented on: ' . $supervisor_comment_date . '</small></p>
         </div>';
@@ -330,8 +412,9 @@ function generateAppraisalHTML($appraisal, $scores, $totalScore) {
 
     $html .= '
     <div class="footer">
-        <p>Generated on: ' . date('M d, Y H:i:s') . '</p>
-        <p>HR Management System - Performance Appraisal Report</p>
+        <p><strong>Confidential Document - For Official Use Only</strong></p>
+        <p>This performance appraisal report is generated by MUWASCO HR Management System</p>
+        <p>© ' . date('Y') . ' Muranga Water Supply Company Ltd. All rights reserved.</p>
     </div>
     
     <div class="print-buttons no-print">
@@ -374,7 +457,7 @@ if (isset($_POST['export']) && isset($_POST['appraisal_id'])) {
         LEFT JOIN sections s ON e.section_id = s.id
         JOIN appraisal_cycles ac ON ea.appraisal_cycle_id = ac.id
         JOIN employees e_appraiser ON ea.appraiser_id = e_appraiser.id
-        WHERE ea.id = ?
+        WHERE ea.id = ? AND ea.status = 'submitted'
     ";
     
     // Add role-based restrictions
@@ -852,16 +935,16 @@ include 'nav_bar.php';
        
             <div class="content">
                 <!-- Navigation Tabs -->
-                <div class="leave-tabs">
-                    <a href="strategic_plan.php" class="leave-tab">Strategic Plan</a>
+               <div class="leave-tabs">
+                    <a href="strategic_plan.php?tab=goals" class="leave-tab">Strategic Plan</a>
                     <a href="employee_appraisal.php" class="leave-tab ">Employee Appraisal</a>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director', 'section_head', 'dept_head'])): ?>
-                        <a href="performance_appraisal.php" class="leave-tab ">Performance Appraisal</a>
+                    <?php if (in_array($_SESSION['hr_system_user_role'] ?? '', ['hr_manager', 'super_admin', 'manager', 'managing_director', 'section_head', 'dept_head' , 'sub_section_head'])): ?>
+                        <a href="performance_appraisal.php" class="leave-tab">Performance Appraisal</a>
                     <?php endif; ?>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin'])): ?>
+                    <?php if (in_array($_SESSION['hr_system_user_role'] ?? '', ['hr_manager', 'super_admin', 'manager'])): ?>
                         <a href="appraisal_management.php" class="leave-tab">Appraisal Management</a>
                     <?php endif; ?>
-                        <a href="completed_appraisals.php" class="leave-tab active">Completed Appraisals</a>                   
+                    <a href="completed_appraisals.php" class="leave-tab active">Completed Appraisals</a>
                 </div>
 
                 <!-- Filters Section -->
@@ -998,31 +1081,35 @@ include 'nav_bar.php';
                                             <?php echo htmlspecialchars($appraisal['appraiser_first_name'] . ' ' . $appraisal['appraiser_last_name']); ?>
                                         </td>
                                         <td>
-                                            <?php echo date('M d, Y', strtotime($appraisal['submitted_at'])); ?>
+                                            <?php echo $appraisal['status'] === 'submitted' ? date('M d, Y', strtotime($appraisal['submitted_at'])) : 'N/A'; ?>
                                         </td>
                                         <td>
                                             <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $appraisal['status']))); ?>
                                         </td>
                                         <td>
-                                            <div class="export-buttons">
-                                                <form method="POST" action="" style="display: inline;">
-                                                    <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
-                                                    <input type="hidden" name="export_type" value="pdf">
-                                                    <button type="submit" name="export" class="btn-export btn-pdf" title="Export PDF">PDF</button>
-                                                </form>
-                                                
-                                                <form method="POST" action="" style="display: inline;">
-                                                    <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
-                                                    <input type="hidden" name="export_type" value="word">
-                                                    <button type="submit" name="export" class="btn-export btn-word" title="Export Word">Word</button>
-                                                </form>
-                                                
-                                                <form method="POST" action="" target="_blank" style="display: inline;">
-                                                    <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
-                                                    <input type="hidden" name="export_type" value="print">
-                                                    <button type="submit" name="export" class="btn-export btn-print" title="Print">Print</button>
-                                                </form>
-                                            </div>
+                                            <?php if ($appraisal['status'] === 'submitted'): ?>
+                                                <div class="export-buttons">
+                                                    <form method="POST" action="" style="display: inline;">
+                                                        <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
+                                                        <input type="hidden" name="export_type" value="pdf">
+                                                        <button type="submit" name="export" class="btn-export btn-pdf" title="Export PDF">PDF</button>
+                                                    </form>
+                                                    
+                                                    <form method="POST" action="" style="display: inline;">
+                                                        <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
+                                                        <input type="hidden" name="export_type" value="word">
+                                                        <button type="submit" name="export" class="btn-export btn-word" title="Export Word">Word</button>
+                                                    </form>
+                                                    
+                                                    <form method="POST" action="" target="_blank" style="display: inline;">
+                                                        <input type="hidden" name="appraisal_id" value="<?php echo $appraisal['id']; ?>">
+                                                        <input type="hidden" name="export_type" value="print">
+                                                        <button type="submit" name="export" class="btn-export btn-print" title="Print">Print</button>
+                                                    </form>
+                                                </div>
+                                            <?php else: ?>
+                                                <span>-</span>
+                                            <?php endif; ?>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>

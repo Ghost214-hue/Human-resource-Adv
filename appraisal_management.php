@@ -6,34 +6,20 @@ error_reporting(E_ALL);
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
-
-// Permission checking function
-function hasPermission($requiredRole) {
-    if (!isset($_SESSION['user_role'])) {
-        return false;
-    }
-    
-    $roleHierarchy = [
-        'super_admin' => 5,
-        'hr_manager' => 4,
-        'dept_head' => 3,
-        'section_head' => 2,
-        'manager' => 1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roleHierarchy[$_SESSION['user_role']] ?? 0;
-    $requiredLevel = $roleHierarchy[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
 }
-
+require_once 'auth_check.php';
+require_once 'auth.php';
 // Check if user is logged in and has HR/Admin privileges
 if (!isset($_SESSION['user_id']) || !in_array($_SESSION['user_role'], ['hr_manager', 'super_admin', 'dept_head'])) {
     header("Location: login.php");
     exit();
 }
-require_once 'header.php';
+
 require_once 'config.php';
 $conn = getConnection();
 
@@ -77,6 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $description = trim($_POST['description']);
                 $max_score = (int)$_POST['max_score'];
                 $section_id = !empty($_POST['section_id']) ? $_POST['section_id'] : null;
+                $subsection_id = !empty($_POST['subsection_id']) ? $_POST['subsection_id'] : null;
                 $department_id = !empty($_POST['department_id']) ? $_POST['department_id'] : null;
                 $role = !empty($_POST['role']) ? $_POST['role'] : null;
                 $is_active = isset($_POST['is_active']) ? 1 : 0;
@@ -84,10 +71,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($name) && $max_score > 0) {
                     $stmt = $conn->prepare("
                         INSERT INTO performance_indicators 
-                        (name, description, max_score, section_id, department_id, role, is_active) 
-                        VALUES (?, ?, ?,?, ?, ?, ?)
+                        (name, description, max_score, section_id, subsection_id, department_id, role, is_active) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ");
-                    $stmt->bind_param("ssdiissi", $name, $description, $max_score, $section_id, $department_id, $role, $is_active);
+                    $stmt->bind_param("ssdiissi", $name, $description, $max_score, $section_id, $subsection_id, $department_id, $role, $is_active);
                     
                     if ($stmt->execute()) {
                         $_SESSION['flash_message'] = 'Performance indicator created successfully!';
@@ -163,6 +150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $description = trim($_POST['description']);
                 $max_score = (int)$_POST['max_score'];
                 $section_id = !empty($_POST['section_id']) ? $_POST['section_id'] : null;
+                $subsection_id = !empty($_POST['subsection_id']) ? $_POST['subsection_id'] : null;
                 $department_id = !empty($_POST['department_id']) ? $_POST['department_id'] : null;
                 $role = !empty($_POST['role']) ? $_POST['role'] : null;
                 $is_active = isset($_POST['is_active']) ? 1 : 0;
@@ -171,10 +159,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt = $conn->prepare("
                         UPDATE performance_indicators 
                         SET name = ?, description = ?, max_score = ?, 
-                            section_id = ?, department_id = ?, role = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP 
+                            section_id = ?, subsection_id = ?, department_id = ?, role = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP 
                         WHERE id = ?
                     ");
-                    $stmt->bind_param("ssiissii", $name, $description, $max_score, $section_id, $department_id, $role, $is_active, $id);
+                    $stmt->bind_param("ssdiissii", $name, $description, $max_score, $section_id, $subsection_id, $department_id, $role, $is_active, $id);
                     
                     if ($stmt->execute()) {
                         $_SESSION['flash_message'] = 'Performance indicator updated successfully!';
@@ -206,13 +194,15 @@ $cycles = $conn->query("
     ORDER BY ac.start_date DESC
 ")->fetch_all(MYSQLI_ASSOC);
 
-// Get all performance indicators with section and department info
+// Get all performance indicators with section, subsection, and department info
 $indicators = $conn->query("
     SELECT pi.*, 
            s.name as section_name,
+           ss.name as subsection_name,
            d.name as department_name
     FROM performance_indicators pi
     LEFT JOIN sections s ON pi.section_id = s.id
+    LEFT JOIN subsections ss ON pi.id = ss.id
     LEFT JOIN departments d ON pi.department_id = d.id
     ORDER BY pi.is_active DESC, pi.name
 ")->fetch_all(MYSQLI_ASSOC);
@@ -234,6 +224,15 @@ $sections = $conn->query("
     ORDER BY d.name, s.name
 ")->fetch_all(MYSQLI_ASSOC);
 
+// Get subsections with department and section info for dropdown
+$subsections = $conn->query("
+    SELECT ss.*, s.name as section_name, d.name as department_name, d.id as department_id, s.id as section_id
+    FROM subsections ss
+    LEFT JOIN sections s ON ss.section_id = s.id
+    LEFT JOIN departments d ON ss.department_id = d.id
+    ORDER BY d.name, s.name, ss.name
+")->fetch_all(MYSQLI_ASSOC);
+
 // Get departments for dropdown
 $departments = $conn->query("
     SELECT id, name
@@ -241,7 +240,7 @@ $departments = $conn->query("
     ORDER BY name
 ")->fetch_all(MYSQLI_ASSOC);
 
-// Prepare sections data for JavaScript
+// Prepare sections and subsections data for JavaScript
 $sectionsByDepartment = [];
 foreach ($sections as $section) {
     $deptId = $section['department_id'] ?? 0;
@@ -251,7 +250,17 @@ foreach ($sections as $section) {
     $sectionsByDepartment[$deptId][] = $section;
 }
 
+$subsectionsBySection = [];
+foreach ($subsections as $subsection) {
+    $sectionId = $subsection['section_id'] ?? 0;
+    if (!isset($subsectionsBySection[$sectionId])) {
+        $subsectionsBySection[$sectionId] = [];
+    }
+    $subsectionsBySection[$sectionId][] = $subsection;
+}
+
 $conn->close();
+require_once 'header.php';
 include 'nav_bar.php';
 ?>
 
@@ -594,24 +603,21 @@ include 'nav_bar.php';
 </head>
 <body>
     <div class="container">
-       
         <!-- Main Content Area -->
         <div class="main-content">
-            
             <!-- Content -->
             <div class="content">
-      <?php if (isset($_SESSION['flash_message']) && isset($_SESSION['flash_type'])): ?>
-    <div class="alert alert-<?php echo htmlspecialchars($_SESSION['flash_type']); ?>">
-        <?php echo htmlspecialchars($_SESSION['flash_message']); ?>
-        <?php
-        // Clear flash message after displaying
-        unset($_SESSION['flash_message']);
-        unset($_SESSION['flash_type']);
-        ?>
-    </div>
-<?php endif; ?>
+                <?php if (isset($_SESSION['flash_message']) && isset($_SESSION['flash_type'])): ?>
+                    <div class="alert alert-<?php echo htmlspecialchars($_SESSION['flash_type']); ?>">
+                        <?php echo htmlspecialchars($_SESSION['flash_message']); ?>
+                        <?php
+                        // Clear flash message after displaying
+                        unset($_SESSION['flash_message']);
+                        unset($_SESSION['flash_type']);
+                        ?>
+                    </div>
+                <?php endif; ?>
                 
-
                 <div class="leave-tabs">
                     <a href="employee_appraisal.php" class="leave-tab">Employee Appraisal</a>
                     <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director', 'section_head', 'dept_head'])): ?>
@@ -722,7 +728,7 @@ include 'nav_bar.php';
                             
                             <div class="form-grid">
                                 <div class="form-group">
-                                    <label for="indicator_name">Departmental Goal </label>
+                                    <label for="indicator_name">Departmental Goal</label>
                                     <input type="text" id="indicator_name" name="indicator_name" class="form-control" required placeholder="Team Collaboration">
                                 </div>
                                 
@@ -730,7 +736,6 @@ include 'nav_bar.php';
                                     <label for="description">Description</label>
                                     <textarea id="description" name="description" class="form-control" rows="2" placeholder="Measures how well the employee works with team members"></textarea>
                                 </div>
-        
                                 
                                 <div class="form-group">
                                     <label for="role">Role (Optional)</label>
@@ -768,6 +773,18 @@ include 'nav_bar.php';
                                     </select>
                                 </div>
                                 
+                                <div class="form-group" id="subsection-group">
+                                    <label for="subsection_id">Subsection (Optional)</label>
+                                    <select id="subsection_id" name="subsection_id" class="form-control">
+                                        <option value="">-- Select Subsection --</option>
+                                        <?php foreach ($subsections as $subsection): ?>
+                                            <option value="<?php echo $subsection['id']; ?>" data-section-id="<?php echo $subsection['section_id']; ?>" data-department-id="<?php echo $subsection['department_id']; ?>">
+                                                <?php echo htmlspecialchars($subsection['name'] . ' (' . $subsection['section_name'] . ', ' . $subsection['department_name'] . ')'); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                
                                 <div class="form-group">
                                     <label for="max_score">Max Score</label>
                                     <input type="number" id="max_score" name="max_score" class="form-control" min="1" required value="5">
@@ -795,6 +812,7 @@ include 'nav_bar.php';
                                         <th>Role</th>
                                         <th>Department</th>
                                         <th>Section</th>
+                                        <th>Subsection</th>
                                         <th>Max</th>
                                         <th>Status</th>
                                         <th>Actions</th>
@@ -808,6 +826,7 @@ include 'nav_bar.php';
                                             <td><?php echo $indicator['role'] ? htmlspecialchars(ucwords(str_replace('_', ' ', $indicator['role']))) : 'N/A'; ?></td>
                                             <td><?php echo $indicator['department_name'] ? htmlspecialchars($indicator['department_name']) : 'N/A'; ?></td>
                                             <td><?php echo $indicator['section_name'] ? htmlspecialchars($indicator['section_name']) : 'N/A'; ?></td>
+                                            <td><?php echo $indicator['subsection_name'] ? htmlspecialchars($indicator['subsection_name']) : 'N/A'; ?></td>
                                             <td><?php echo $indicator['max_score']; ?></td>
                                             <td>
                                                 <form method="POST" action="" style="display: inline;">
@@ -858,7 +877,6 @@ include 'nav_bar.php';
                         <div class="detail-label">Description</div>
                         <div class="detail-value" id="indicator-description"></div>
                     </div>
-                
                     <div class="detail-row">
                         <div class="detail-label">Role</div>
                         <div class="detail-value" id="indicator-role"></div>
@@ -870,6 +888,10 @@ include 'nav_bar.php';
                     <div class="detail-row">
                         <div class="detail-label">Section</div>
                         <div class="detail-value" id="indicator-section"></div>
+                    </div>
+                    <div class="detail-row">
+                        <div class="detail-label">Subsection</div>
+                        <div class="detail-value" id="indicator-subsection"></div>
                     </div>
                     <div class="detail-row">
                         <div class="detail-label">Max Score</div>
@@ -915,7 +937,6 @@ include 'nav_bar.php';
                             <label for="edit-description">Description</label>
                             <textarea id="edit-description" name="description" class="form-control" rows="3"></textarea>
                         </div>
-                        
                         <div class="form-group" id="edit-department-group">
                             <label for="edit-role">Role (Optional)</label>
                             <select id="edit-role" name="role" class="form-control">
@@ -945,6 +966,17 @@ include 'nav_bar.php';
                                 <?php foreach ($sections as $section): ?>
                                     <option value="<?php echo $section['id']; ?>" data-department-id="<?php echo $section['department_id']; ?>">
                                         <?php echo htmlspecialchars($section['name'] . ' (' . $section['department_name'] . ')'); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group" id="edit-subsection-group">
+                            <label for="edit-subsection-id">Subsection (Optional)</label>
+                            <select id="edit-subsection-id" name="subsection_id" class="form-control">
+                                <option value="">-- Select Subsection --</option>
+                                <?php foreach ($subsections as $subsection): ?>
+                                    <option value="<?php echo $subsection['id']; ?>" data-section-id="<?php echo $subsection['section_id']; ?>" data-department-id="<?php echo $subsection['department_id']; ?>">
+                                        <?php echo htmlspecialchars($subsection['name'] . ' (' . $subsection['section_name'] . ', ' . $subsection['department_name'] . ')'); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -1040,21 +1072,21 @@ include 'nav_bar.php';
             showTab('cycles');
 
             // Initialize role-based visibility
-            updateFieldVisibility('role', 'department-group', 'section-group');
-            updateFieldVisibility('edit-role', 'edit-department-group', 'edit-section-group');
+            updateFieldVisibility('role', 'department-group', 'section-group', 'subsection-group');
+            updateFieldVisibility('edit-role', 'edit-department-group', 'edit-section-group', 'edit-subsection-group');
 
-            // Initialize section filtering
+            // Initialize section and subsection filtering
             updateSectionOptions('department_id', 'section_id');
             updateSectionOptions('edit-department-id', 'edit-section-id');
+            updateSubsectionOptions('section_id', 'subsection_id');
+            updateSubsectionOptions('edit-section-id', 'edit-subsection-id');
         });
 
         // Tab switching function
         function showTab(tabId) {
-            // Remove active class from all tabs and content
             document.querySelectorAll('.tab-link').forEach(tab => tab.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-            // Add active class to clicked tab and corresponding content
             document.querySelector(`a[href="#${tabId}"]`).classList.add('active');
             document.getElementById(tabId).classList.add('active');
         }
@@ -1079,6 +1111,7 @@ include 'nav_bar.php';
                 document.getElementById('indicator-role').textContent = indicator.role ? indicator.role.replace(/_/g, ' ') : 'N/A';
                 document.getElementById('indicator-department').textContent = indicator.department_name || 'N/A';
                 document.getElementById('indicator-section').textContent = indicator.section_name || 'N/A';
+                document.getElementById('indicator-subsection').textContent = indicator.subsection_name || 'N/A';
                 document.getElementById('indicator-max-score').textContent = indicator.max_score;
                 document.getElementById('indicator-status').textContent = 
                     indicator.is_active ? 'Active' : 'Inactive';
@@ -1105,11 +1138,13 @@ include 'nav_bar.php';
                 document.getElementById('edit-role').value = indicator.role || '';
                 document.getElementById('edit-department-id').value = indicator.department_id || '';
                 document.getElementById('edit-section-id').value = indicator.section_id || '';
+                document.getElementById('edit-subsection-id').value = indicator.subsection_id || '';
                 document.getElementById('edit-max-score').value = indicator.max_score;
                 document.getElementById('edit-is-active').checked = indicator.is_active == 1;
                 
                 updateSectionOptions('edit-department-id', 'edit-section-id', indicator.section_id);
-                updateFieldVisibility('edit-role', 'edit-department-group', 'edit-section-group');
+                updateSubsectionOptions('edit-section-id', 'edit-subsection-id', indicator.subsection_id);
+                updateFieldVisibility('edit-role', 'edit-department-group', 'edit-section-group', 'edit-subsection-group');
                 
                 showModal('editIndicatorModal');
             } else {
@@ -1152,27 +1187,34 @@ include 'nav_bar.php';
         }
 
         // Update field visibility based on role selection
-        function updateFieldVisibility(roleId, departmentGroupId, sectionGroupId) {
+        function updateFieldVisibility(roleId, departmentGroupId, sectionGroupId, subsectionGroupId) {
             const roleSelect = document.getElementById(roleId);
             const departmentGroup = document.getElementById(departmentGroupId);
             const sectionGroup = document.getElementById(sectionGroupId);
+            const subsectionGroup = document.getElementById(subsectionGroupId);
             
             roleSelect.addEventListener('change', function() {
                 const role = this.value;
                 if (role === 'managing_director') {
                     departmentGroup.classList.add('hidden');
                     sectionGroup.classList.add('hidden');
+                    subsectionGroup.classList.add('hidden');
                     document.getElementById(departmentGroupId.replace('group', 'id')).value = '';
                     document.getElementById(sectionGroupId.replace('group', 'id')).value = '';
+                    document.getElementById(subsectionGroupId.replace('group', 'id')).value = '';
                 } else if (role === 'dept_head') {
                     departmentGroup.classList.remove('hidden');
                     sectionGroup.classList.add('hidden');
+                    subsectionGroup.classList.add('hidden');
                     document.getElementById(sectionGroupId.replace('group', 'id')).value = '';
+                    document.getElementById(subsectionGroupId.replace('group', 'id')).value = '';
                 } else {
                     departmentGroup.classList.remove('hidden');
                     sectionGroup.classList.remove('hidden');
+                    subsectionGroup.classList.remove('hidden');
                 }
                 updateSectionOptions(departmentGroupId.replace('group', 'id'), sectionGroupId.replace('group', 'id'));
+                updateSubsectionOptions(sectionGroupId.replace('group', 'id'), subsectionGroupId.replace('group', 'id'));
             });
         }
 
@@ -1198,12 +1240,46 @@ include 'nav_bar.php';
                         sectionSelect.appendChild(option);
                     });
                 }
+                
+                // Trigger subsection update
+                const subsectionId = sectionId.replace('section_id', 'subsection_id');
+                updateSubsectionOptions(sectionId, subsectionId);
             });
             
-            // Trigger change event to initialize section options
             if (departmentSelect.value) {
                 const event = new Event('change');
                 departmentSelect.dispatchEvent(event);
+            }
+        }
+
+        // Update subsection options based on selected section
+        function updateSubsectionOptions(sectionId, subsectionId, selectedSubsectionId = null) {
+            const sectionSelect = document.getElementById(sectionId);
+            const subsectionSelect = document.getElementById(subsectionId);
+            const subsectionsBySection = <?php echo json_encode($subsectionsBySection); ?>;
+            
+            sectionSelect.addEventListener('change', function() {
+                const sectionIdVal = this.value;
+                subsectionSelect.innerHTML = '<option value="">-- Select Subsection --</option>';
+                
+                if (sectionIdVal && subsectionsBySection[sectionIdVal]) {
+                    subsectionsBySection[sectionIdVal].forEach(subsection => {
+                        const option = document.createElement('option');
+                        option.value = subsection.id;
+                        option.textContent = `${subsection.name} (${subsection.section_name}, ${subsection.department_name})`;
+                        option.setAttribute('data-section-id', subsection.section_id);
+                        option.setAttribute('data-department-id', subsection.department_id);
+                        if (selectedSubsectionId && subsection.id == selectedSubsectionId) {
+                            option.selected = true;
+                        }
+                        subsectionSelect.appendChild(option);
+                    });
+                }
+            });
+            
+            if (sectionSelect.value) {
+                const event = new Event('change');
+                sectionSelect.dispatchEvent(event);
             }
         }
 

@@ -7,13 +7,20 @@ ob_start();
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
-require_once 'header.php';
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'config.php';
 $conn = getConnection();
 
@@ -24,27 +31,6 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' =>4 ,
-        'managing_director'=>3,
-        'dept_head' => 2,
-        'section head'=>1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
-
 
 function formatDate($date) {
     if (!$date) return 'N/A';
@@ -75,9 +61,11 @@ function getStatusDisplayName($status) {
     }
 }
 
-// Get user's employee record
-$userEmployeeQuery = "SELECT e.* FROM employees e 
+// Get user's employee record with department name
+$userEmployeeQuery = "SELECT e.*, d.name as department_name 
+                      FROM employees e 
                       LEFT JOIN users u ON u.employee_id = e.employee_id 
+                      LEFT JOIN departments d ON e.department_id = d.id
                       WHERE u.id = ?";
 $stmt = $conn->prepare($userEmployeeQuery);
 $stmt->bind_param("i", $user['id']);
@@ -88,367 +76,143 @@ $userEmployee = $stmt->get_result()->fetch_assoc();
 $employee = null;
 $leaveBalances = [];
 $leaveHistory = [];
+$currentFinancialYearId = null;
+$yearDetails = 'Current Year';
+$startDate = '';
+$endDate = '';
 
-// Get profile data with enhanced balance information
 if ($userEmployee) {
     $employee = $userEmployee;
 
-    // Get leave balances for current user with leave type details - only latest financial year
-    $latestYearQuery = "SELECT MAX(year_name) as latest_year FROM  financial_years";
-    $latestYearResult = $conn->query($latestYearQuery);
-    $latestYear = $latestYearResult->fetch_assoc()['latest_year'];
-
-    $stmt = $conn->prepare("SELECT elb.*, lt.name as leave_type_name, lt.max_days_per_year, lt.counts_weekends,
-                           lt.deducted_from_annual
-                           FROM employee_leave_balances elb
-                           JOIN leave_types lt ON elb.leave_type_id = lt.id
-                           WHERE elb.employee_id = ? 
-                           AND elb.financial_year_id = ?
-                           AND lt.is_active = 1
-                           ORDER BY lt.name");
-    $stmt->bind_param("ii", $employee['id'], $latestYear);
+    // Get current financial year based on today's date
+    $currentDate = date('Y-m-d');
+    $currentYearQuery = "SELECT id, year_name, start_date, end_date FROM financial_years 
+                         WHERE start_date <= ? AND end_date >= ? 
+                         LIMIT 1";
+    $stmt = $conn->prepare($currentYearQuery);
+    $stmt->bind_param("ss", $currentDate, $currentDate);
     $stmt->execute();
-    $leaveBalances = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $currentYearResult = $stmt->get_result();
+    $currentYearData = $currentYearResult->fetch_assoc();
 
-    // Get comprehensive leave history with deduction details
-    $historyQuery = "SELECT la.*, lt.name as leave_type_name,
-                     la.primary_days, la.annual_days, la.unpaid_days
-                     FROM leave_applications la
-                     JOIN leave_types lt ON la.leave_type_id = lt.id
-                     WHERE la.employee_id = ?
-                     ORDER BY la.applied_at DESC";
+    if ($currentYearData) {
+        $currentFinancialYearId = $currentYearData['id'];
+        $yearDetails = $currentYearData['year_name']; // ✅ Fixed: was 'year'
+        $startDate = $currentYearData['start_date'];
+        $endDate = $currentYearData['end_date'];
+
+        // ✅ Removed 'lt.max_days_per_year' — column no longer exists
+        $stmt = $conn->prepare("
+            SELECT elb.*, 
+                   lt.name AS leave_type_name,  
+                   lt.counts_weekends,
+                   lt.deducted_from_annual
+            FROM employee_leave_balances elb
+            JOIN leave_types lt ON elb.leave_type_id = lt.id
+            WHERE elb.employee_id = ? 
+              AND elb.financial_year_id = ?
+              AND lt.is_active = 1
+            ORDER BY lt.name
+        ");
+        $stmt->bind_param("ii", $employee['id'], $currentFinancialYearId);
+        $stmt->execute();
+        $leaveBalances = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    } else {
+        // Fallback: use latest financial year with leave data
+        $latestYearQuery = "SELECT MAX(financial_year_id) AS latest_year 
+                            FROM employee_leave_balances 
+                            WHERE employee_id = ?";
+        $stmt = $conn->prepare($latestYearQuery);
+        $stmt->bind_param("i", $employee['id']);
+        $stmt->execute();
+        $latestYear = $stmt->get_result()->fetch_assoc();
+
+        if ($latestYear && $latestYear['latest_year']) {
+            $currentFinancialYearId = $latestYear['latest_year'];
+
+            $yearDetailsQuery = "SELECT year_name, start_date, end_date 
+                                 FROM financial_years 
+                                 WHERE id = ?";
+            $stmt = $conn->prepare($yearDetailsQuery);
+            $stmt->bind_param("i", $currentFinancialYearId);
+            $stmt->execute();
+            $yearData = $stmt->get_result()->fetch_assoc();
+
+            $yearDetails = $yearData['year_name'] ?? 'Latest Year';
+            $startDate = $yearData['start_date'] ?? '';
+            $endDate = $yearData['end_date'] ?? '';
+
+            // ✅ Also removed max_days_per_year here (already correct in your original)
+            $stmt = $conn->prepare("
+                SELECT elb.*, 
+                       lt.name AS leave_type_name,  
+                       lt.counts_weekends,
+                       lt.deducted_from_annual
+                FROM employee_leave_balances elb
+                JOIN leave_types lt ON elb.leave_type_id = lt.id
+                WHERE elb.employee_id = ? 
+                  AND elb.financial_year_id = ?
+                  AND lt.is_active = 1
+                ORDER BY lt.name
+            ");
+            $stmt->bind_param("ii", $employee['id'], $currentFinancialYearId);
+            $stmt->execute();
+            $leaveBalances = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        }
+    }
+
+    // ✅ Get leave history — only once (removed duplicate)
+    $historyQuery = "
+        SELECT la.*, 
+               lt.name AS leave_type_name,
+               la.primary_days, 
+               la.annual_days, 
+               la.unpaid_days
+        FROM leave_applications la
+        JOIN leave_types lt ON la.leave_type_id = lt.id
+        WHERE la.employee_id = ?
+        ORDER BY la.applied_at DESC
+    ";
     $stmt = $conn->prepare($historyQuery);
     $stmt->bind_param("i", $employee['id']);
     $stmt->execute();
-    $historyResult = $stmt->get_result();
-    $leaveHistory = $historyResult->fetch_all(MYSQLI_ASSOC);
+    $leaveHistory = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 }
-include 'nav_bar.php';
+
+require_once 'header.php';
+require_once 'nav_bar.php';
 ?>
 
 <!DOCTYPE html>
-<html lang="en" data-theme="<?php echo $_SESSION['theme'] ?? 'light'; ?>">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>My Leave Profile - HR Management System</title>
     <link rel="stylesheet" href="style.css">
-    
-    <style>
-        /* Ensure body adapts to theme */
-        body {
-            font-family: 'Arial', sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-            position: relative;
-            transition: all 0.3s ease;
-        }
-
-        :root[data-theme="light"] body {
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 50%, #dee2e6 100%);
-        }
-
-        :root[data-theme="dark"] body {
-            background: linear-gradient(135deg, #1a1a1a 0%, #2c2c2c 50%, #3d3d3d 100%);
-        }
-
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            pointer-events: none;
-        }
-
-        :root[data-theme="light"] body::before {
-            background: 
-                radial-gradient(circle at 20% 80%, rgba(0, 123, 255, 0.03) 0%, transparent 50%),
-                radial-gradient(circle at 80% 20%, rgba(111, 66, 193, 0.03) 0%, transparent 50%);
-        }
-
-        :root[data-theme="dark"] body::before {
-            background: 
-                radial-gradient(circle at 20% 80%, rgba(0, 123, 255, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 80% 20%, rgba(111, 66, 193, 0.1) 0%, transparent 50%);
-        }
-
-        /* Container and Main Content */
-        .container {
-            display: flex;
-            min-height: 100vh;
-        }
-
-        .sidebar {
-            width: 250px;
-            background: var(--bg-secondary);
-            padding: 1rem;
-            box-shadow: var(--shadow-md);
-            transition: all 0.3s ease;
-        }
-
-        .main-content {
-            flex-grow: 1;
-            padding: 2rem;
-            background: var(--bg-primary);
-        }
-
-        /* Leave Tabs */
-        .leave-tabs {
-            display: flex;
-            gap: 0.5rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .leave-tab {
-            padding: 0.5rem 1rem;
-            border-radius: 8px;
-            text-decoration: none;
-            color: var(--text-secondary);
-            transition: all 0.3s ease;
-        }
-
-        .leave-tab:hover {
-            background: var(--bg-glass);
-            color: var(--text-primary);
-        }
-
-        .leave-tab.active {
-            background: var(--primary-color);
-            color: white;
-            font-weight: 600;
-        }
-
-        /* My Leave Profile Tab Styling */
-        .tab-content {
-            background: var(--bg-card);
-            padding: 1.5rem;
-            border-radius: 12px;
-            box-shadow: var(--shadow-md);
-            backdrop-filter: blur(5px);
-        }
-
-        .tab-content h3 {
-            margin-top: 0;
-            font-size: 1.75rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            border-bottom: 2px solid var(--border-accent);
-            padding-bottom: 0.5rem;
-        }
-
-        /* Employee Information */
-        .employee-info {
-            background: var(--bg-secondary);
-            padding: 1rem;
-            border-radius: 8px;
-            border: 1px solid var(--border-color);
-            transition: all 0.3s ease;
-        }
-
-        .employee-info h4 {
-            font-size: 1.25rem;
-            margin-bottom: 1rem;
-            color: var(--text-primary);
-        }
-
-        .employee-info p {
-            margin: 0.5rem 0;
-            font-size: 1rem;
-            color: var(--text-secondary);
-        }
-
-        .employee-info p strong {
-            color: var(--text-primary);
-            font-weight: 600;
-        }
-
-        /* Leave Balance Section */
-        .leave-balance-section {
-            padding: 1rem;
-        }
-
-        .leave-balance-section h4 {
-            font-size: 1.25rem;
-            color: var(--text-primary);
-        }
-        
-        .leave-balance-section span{
-            font-size: 2rem;
-            color: var(--text-primary);
-        }
-
-
-        .leave-balance-section .badge-info {
-            background: var(--info-color);
-            color: white;
-            padding: 0.25rem 0.75rem;
-            border-radius: 12px;
-            font-size: 0.875rem;
-        }
-
-        .alert.alert-info {
-            background: var(--bg-glass);
-            color: var(--text-primary);
-            border: 1px solid var(--info-color);
-            border-radius: 8px;
-            padding: 1rem;
-        }
-
-        .row {
-            display: flex;
-            flex-wrap: wrap;
-            margin: 0 -15px;
-        }
-
-        .col-md-4 {
-            flex: 0 0 33.3333%;
-            max-width: 33.3333%;
-            padding: 0 15px;
-        }
-
-        .card {
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            overflow: hidden;
-            transition: all 0.3s ease;
-        }
-
-        .card:hover {
-            box-shadow: var(--shadow-lg);
-            transform: translateY(-2px);
-        }
-
-        .card-header {
-            padding: 0.75rem 1rem;
-            background: var(--primary-color);
-            color: white;
-            border-bottom: none;
-        }
-
-        .card-header h5 {
-            margin: 0;
-            font-size: 1.1rem;
-            font-weight: 500;
-        }
-
-        .card-body {
-            padding: 1rem;
-        }
-
-        .progress {
-            background: var(--bg-tertiary);
-            border-radius: 10px;
-            overflow: hidden;
-        }
-
-        .progress-bar {
-            transition: width 0.6s ease;
-        }
-
-        .progress-bar.bg-success {
-            background: var(--success-color);
-        }
-
-        .progress-bar.bg-warning {
-            background: var(--warning-color);
-        }
-
-        .progress-bar.bg-danger {
-            background: var(--error-color);
-        }
-
-        .balance-details {
-            font-size: 0.9rem;
-        }
-
-        .balance-details .d-flex {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .balance-details span {
-            color: var(--text-secondary);
-        }
-
-        .balance-details strong {
-            color: var(--text-primary);
-        }
-
-        .balance-details .text-danger {
-            color: var(--error-color);
-        }
-
-        .balance-details .text-success {
-            color: var(--success-color);
-        }
-
-        .card-footer {
-            background: var(--bg-secondary);
-            padding: 0.75rem 1rem;
-            border-top: 1px solid var(--border-color);
-        }
-
-        .card-footer .text-muted {
-            color: var(--text-muted);
-        }
-
-        /* Responsive Design */
-        @media (max-width: 768px) {
-            .container {
-                flex-direction: column;
-            }
-
-            .sidebar {
-                width: 100%;
-                transform: translateX(-100%);
-            }
-
-            .sidebar.mobile-open {
-                transform: translateX(0);
-            }
-
-            .main-content {
-                padding: 1rem;
-            }
-
-            .col-md-4 {
-                flex: 0 0 100%;
-                max-width: 100%;
-            }
-        }
-    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
-    <div class="container">
-        
-        
-        <div class="main-content">
-            <div class="content">
-                <div class="leave-tabs">
-                    <a href="leave_management.php" class="leave-tab">Apply Leave</a>
-                    <?php if (in_array($user['role'], ['hr_manager', 'dept_head', 'section_head', 'manager', 'managing_director','super_admin'])): ?>
+    <!-- Main Content -->
+    <div class="main-content">
+        <div class="content">
+            <div class="leave-tabs">
+                <a href="leave_management.php" class="leave-tab">Apply Leave</a>
+                <?php if (in_array($user['role'], ['hr_manager', 'dept_head', 'section_head', 'manager', 'managing_director','super_admin'])): ?>
                     <a href="manage.php" class="leave-tab">Manage Leave</a>
-                    <?php endif; ?>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director'])): ?>
+                <?php endif; ?>
+                <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director'])): ?>
                     <a href="history.php" class="leave-tab">Leave History</a>
                     <a href="holidays.php" class="leave-tab">Holidays</a>
-                    <?php endif; ?>
-                    <a href="profile.php" class="leave-tab active">My Leave Profile</a>
-                </div>
+                <?php endif; ?>
+                <a href="profile.php" class="leave-tab active">My Leave Profile</a>
+            </div>
 
-                <!-- Enhanced My Leave Profile Tab -->
-                <div class="tab-content">
-                    <h3>My Leave Profile</h3>
+            <!-- Enhanced My Leave Profile Tab -->
+            <div class="tab-content">
+                <h3>My Leave Profile</h3>
 
-                    <?php if ($employee): ?>
+                <?php if ($employee): ?>
                     <!-- Employee Information -->
                     <div class="employee-info mb-4">
                         <div class="form-grid">
@@ -457,7 +221,7 @@ include 'nav_bar.php';
                                 <p><strong>Employee ID:</strong> <?php echo htmlspecialchars($employee['employee_id']); ?></p>
                                 <p><strong>Name:</strong> <?php echo htmlspecialchars($employee['first_name'] . ' ' . $employee['last_name']); ?></p>
                                 <p><strong>Employment Type:</strong> <?php echo htmlspecialchars($employee['employment_type']); ?></p>
-                                <p><strong>Department:</strong> <?php echo htmlspecialchars($employee['department_id'] ?? 'N/A'); ?></p>
+                                <p><strong>Department:</strong> <?php echo htmlspecialchars($employee['department_name'] ?? 'N/A'); ?></p>
                             </div>
                         </div>
                     </div>
@@ -465,14 +229,19 @@ include 'nav_bar.php';
                     <!-- Enhanced Leave Balance Display -->
                     <div class="leave-balance-section mb-4">
                         <div class="d-flex justify-content-between align-items-center mb-3">
-                            <h4>Leave Balances</h4>
-                            <?php if (isset($latestYear)): ?>
-                            <span class="badge badge-info">Financial Year ID: <?php echo $latestYear; ?></span>
+                            <h4>Leave Balances - <?php echo htmlspecialchars($yearDetails); ?></h4>
+                            <?php if ($startDate && $endDate): ?>
+                                <small class="text-muted">
+                                    (<?php echo formatDate($startDate); ?> to <?php echo formatDate($endDate); ?>)
+                                </small>
                             <?php endif; ?>
                         </div>
 
                         <?php if (empty($leaveBalances)): ?>
-                            <div class="alert alert-info">No leave balances found for the current financial year.</div>
+                            <div class="alert alert-warning">
+                                <h5>No leave balances found for this financial year.</h5>
+                                <p class="mb-0">Please contact HR if you believe this is incorrect.</p>
+                            </div>
                         <?php else: ?>
                             <div class="row">
                                 <?php foreach ($leaveBalances as $balance): ?>
@@ -484,12 +253,14 @@ include 'nav_bar.php';
                                         <div class="card-body">
                                             <div class="progress mb-3" style="height: 20px;">
                                                 <?php 
-                                                $percentage = ($balance['used_days'] / $balance['allocated_days']) * 100;
+                                                $allocated = floatval($balance['allocated_days']);
+                                                $used = floatval($balance['used_days']);
+                                                $percentage = $allocated > 0 ? ($used / $allocated) * 100 : 0;
                                                 $progressClass = $percentage > 80 ? 'bg-danger' : ($percentage > 50 ? 'bg-warning' : 'bg-success');
                                                 ?>
                                                 <div class="progress-bar <?php echo $progressClass; ?>" 
                                                      role="progressbar" 
-                                                     style="width: <?php echo $percentage; ?>%" 
+                                                     style="width: <?php echo min($percentage, 100); ?>%" 
                                                      aria-valuenow="<?php echo $percentage; ?>" 
                                                      aria-valuemin="0" 
                                                      aria-valuemax="100">
@@ -500,42 +271,82 @@ include 'nav_bar.php';
                                             <div class="balance-details">
                                                 <div class="d-flex justify-content-between mb-2">
                                                     <span>Allocated:</span>
-                                                    <strong><?php echo $balance['allocated_days']; ?> days</strong>
+                                                    <strong><?php echo number_format($balance['allocated_days'], 2); ?> days</strong>
                                                 </div>
                                                 <div class="d-flex justify-content-between mb-2">
                                                     <span>Used:</span>
-                                                    <strong><?php echo $balance['used_days']; ?> days</strong>
+                                                    <strong><?php echo number_format($balance['used_days'], 2); ?> days</strong>
                                                 </div>
                                                 <div class="d-flex justify-content-between mb-2">
                                                     <span>Remaining:</span>
-                                                    <strong class="<?php echo $balance['remaining_days'] < 0 ? 'text-danger' : 'text-success'; ?>">
-                                                        <?php echo $balance['remaining_days']; ?> days
+                                                    <strong class="<?php echo floatval($balance['total_days']) < 0 ? 'text-danger' : 'text-success'; ?>">
+                                                        <?php echo number_format($balance['total_days'], 2); ?> days
                                                     </strong>
                                                 </div>
-                                                <?php if ($balance['total_days']): ?>
-                                                <div class="d-flex justify-content-between mb-2">
-                                                    <span>Total Entitlement:</span>
-                                                    <strong><?php echo $balance['total_days']; ?> days</strong>
-                                                </div>
-                                                <?php endif; ?>
                                             </div>
                                         </div>
                                         <div class="card-footer bg-light">
                                             <small class="text-muted">
                                                 <?php if ($balance['counts_weekends'] == 0): ?>
-                                                <i class="fas fa-calendar-week"></i> Excludes weekends
+                                                    <i class="fas fa-calendar-week"></i> Excludes weekends
                                                 <?php else: ?>
-                                                <i class="fas fa-calendar-alt"></i> Includes weekends
+                                                    <i class="fas fa-calendar-alt"></i> Includes weekends
                                                 <?php endif; ?>
 
-                                                <?php if ($balance['deducted_from_annual']): ?>
-                                                <span class="ml-2"><i class="fas fa-exchange-alt"></i> Falls back to Annual Leave</span>
+                                                <?php if (!empty($balance['deducted_from_annual'])): ?>
+                                                    <span class="ml-2"><i class="fas fa-exchange-alt"></i> Falls back to Annual Leave</span>
                                                 <?php endif; ?>
                                             </small>
                                         </div>
                                     </div>
                                 </div>
                                 <?php endforeach; ?>
+                            </div>
+
+                            <!-- Summary Statistics -->
+                            <div class="row mt-4">
+                                <div class="col-md-12">
+                                    <div class="card">
+                                        <div class="card-header bg-light">
+                                            <h6 class="mb-0">Leave Summary - <?php echo htmlspecialchars($yearDetails); ?></h6>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="row text-center">
+                                                <div class="col-md-3">
+                                                    <h4 class="text-primary"><?php echo count($leaveBalances); ?></h4>
+                                                    <small class="text-muted">Leave Types</small>
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <h4 class="text-success">
+                                                        <?php 
+                                                        $totalAllocated = array_sum(array_column($leaveBalances, 'allocated_days'));
+                                                        echo number_format($totalAllocated, 2);
+                                                        ?>
+                                                    </h4>
+                                                    <small class="text-muted">Total Allocated Days</small>
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <h4 class="text-warning">
+                                                        <?php 
+                                                        $totalUsed = array_sum(array_column($leaveBalances, 'used_days'));
+                                                        echo number_format($totalUsed, 2);
+                                                        ?>
+                                                    </h4>
+                                                    <small class="text-muted">Total Used Days</small>
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <h4 class="text-info">
+                                                        <?php 
+                                                        $totalRemaining = array_sum(array_column($leaveBalances, 'remaining_days'));
+                                                        echo number_format($totalRemaining, 2);
+                                                        ?>
+                                                    </h4>
+                                                    <small class="text-muted">Total Remaining Days</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         <?php endif; ?>
                     </div>
@@ -604,12 +415,11 @@ include 'nav_bar.php';
                         <a href="leave_management.php" class="btn btn-primary">Apply for New Leave</a>
                     </div>
 
-                    <?php else: ?>
+                <?php else: ?>
                     <div class="alert alert-warning">
                         Employee record not found. Please contact HR to resolve this issue.
                     </div>
-                    <?php endif; ?>
-                </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>

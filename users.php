@@ -6,7 +6,9 @@ error_reporting(E_ALL);
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
+require_once 'auth_check.php';
 require_once 'config.php';
+require_once 'auth.php';s
 
 $user = [
     'first_name' => isset($_SESSION['user_name']) ? explode(' ', $_SESSION['user_name'])[0] : 'User',
@@ -15,30 +17,18 @@ $user = [
     'id' => $_SESSION['user_id']
 ];
 
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'managing_director' => 6,
-        'super_admin' => 5,
-        'hr_manager' => 4,
-        'dept_head' => 3,
-        'section_head' => 2,
-        'manager' => 1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
 // Only super admin can access this page
 if (!hasPermission('super_admin')) {
     header('Location: dashboard.php');
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+
 function formatDate($date) {
     if (!$date) return 'N/A';
     return date('M d, Y', strtotime($date));
@@ -182,29 +172,8 @@ $users = $result->fetch_all(MYSQLI_ASSOC);
                 <h1>HR System</h1>
                 <p>Management Portal</p>
             </div>
-             <nav class="nav">
-                <ul>
-                    <li><a href="dashboard.php" class="active">Dashboard</a></li>
-                    <li><a href="employees.php">Employees</a></li>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="departments.php">Departments</a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('super_admin')): ?>
-                   <li><a href="admin.php?tab=users">Admin</a></li>
-                   <?php elseif (hasPermission('hr_manager')): ?>
-                  <li><a href="admin.php?tab=financial">Admin</a></li>
-                   <?php endif; ?>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="reports.php">Reports</a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('hr_manager')|| hasPermission('super_admin')||hasPermission('dept_head')||hasPermission('officer')): ?>
-                    <li><a href="leave_management.php">Leave Management</a></li>
-                    <?php endif; ?>
-                    <li><a href="employee_appraisal.php">Performance Appraisal</a></li>
-                    <li><a href="payroll_mnagements.php" ><i class="fas fa-money-check"></i> Payroll</a></li>
-                </ul>
-            </nav>
         </div>
+
 
         <div class="main-content">
             <div class="header">
@@ -230,7 +199,26 @@ $users = $result->fetch_all(MYSQLI_ASSOC);
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                     <h2>System Users (<?php echo count($users); ?>)</h2>
                     <button onclick="showAddUserModal()" class="btn btn-success">Add New User</button>
-                </div>
+                </div><div class="leave-tabs">
+    <?php if (hasPermission('super_admin')): ?>
+        <a href="admin.php?tab=users" class="leave-tab <?= ($current_page === 'admin' && isset($tab) && $tab === 'users') ? 'active' : '' ?>">
+            <i class="fas fa-users"></i> Users
+        </a>
+    <?php endif; ?>
+
+    <a href="admin.php?tab=financial" class="leave-tab <?= ($current_page === 'admin' && isset($tab) && $tab === 'financial') ? 'active' : '' ?>">
+        <i class="fas fa-calendar-alt"></i> Financial Year
+    </a>
+
+    <!-- Add the new consent management tab -->
+    <a href="consent_management.php" class="leave-tab <?= ($current_page === 'admin' && isset($tab) && $tab === 'consents') ? 'active' : '' ?>">
+        <i class="fas fa-file-signature"></i> Employee Consents
+    </a>
+
+    <a href="audit_dashboard.php" class="leave-tab <?= ($current_page === 'audit') ? 'active' : '' ?>">
+        <i class="fas fa-shield-alt"></i> Audit
+    </a>
+</div>
                 
                 <div class="table-container">
                     <table class="table">

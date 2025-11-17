@@ -6,13 +6,19 @@ error_reporting(E_ALL);
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
-
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
-
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'config.php';
 
 // Get current user from session
@@ -22,20 +28,6 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    $roles = [
-        'super_admin' => 3,
-        'hr_manager' => 2,
-        'dept_head' => 1,
-        'employee' => 0
-    ];
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    return $userLevel >= $requiredLevel;
-}
 
 // Helper functions
 function getAllowanceStatusBadge($status) {
@@ -559,7 +551,8 @@ if ($typesResult) {
 $conn->close();
 
 $pageTitle = "Allowances Management";
-require_once 'header.php';
+include 'header.php';
+include 'nav_bar.php';
 ?>
 
 <!DOCTYPE html>
@@ -837,69 +830,31 @@ require_once 'header.php';
 </head>
 <body>
     <div class="container">
-        <!-- Sidebar -->
-        <div class="sidebar">
-            <div class="sidebar-brand">
-                <h1>HR System</h1>
-                <p>Management Portal</p>
-            </div>
-            <nav class="nav">
-                <ul>
-                    <li><a href="dashboard.php" class="active">
-                        <i class="fas fa-tachometer-alt"></i> Dashboard
-                    </a></li>
-                    <li><a href="employees.php">
-                        <i class="fas fa-users"></i> Employees
-                    </a></li>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="departments.php">
-                        <i class="fas fa-building"></i> Departments
-                    </a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('super_admin')): ?>
-                    <li><a href="admin.php?tab=users">
-                        <i class="fas fa-cog"></i> Admin
-                    </a></li>
-                    <?php elseif (hasPermission('hr_manager')): ?>
-                    <li><a href="admin.php?tab=financial">
-                        <i class="fas fa-cog"></i> Admin
-                    </a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('hr_manager')): ?>
-                    <li><a href="reports.php">
-                        <i class="fas fa-chart-bar"></i> Reports
-                    </a></li>
-                    <?php endif; ?>
-                    <?php if (hasPermission('hr_manager') || hasPermission('super_admin') || hasPermission('dept_head') || hasPermission('officer')): ?>
-                    <li><a href="leave_management.php">
-                        <i class="fas fa-calendar-alt"></i> Leave Management
-                    </a></li>
-                    <?php endif; ?>
-                    <li><a href="employee_appraisal.php">
-                        <i class="fas fa-star"></i> Performance Appraisal
-                    </a></li>
-                    <li><a href="payroll_management.php">
-                        <i class="fas fa-money-check"></i> Payroll
-                    </a></li>
-                </ul>
-            </nav>
-        </div>
-        
+      
         <!-- Main Content -->
         <div class="main-content">
             <div class="content">
-                <!-- Tabs Navigation -->
-                <div class="tabs">
+                <!-- Main Navigation Tabs -->
+                 <div class="tabs">
                     <a href="payroll_management.php">Payroll Management</a>
+                    <a href="process_payroll.php" class="active">Process Payroll</a>
                     <a href="deductions.php">Deductions</a>
-                    <a href="allowances.php" class="active">Allowances</a>
-                    <a href="add_bank.php">Add Banks</a>
+                    <a href="allowances.php">Allowances</a>
+                    <a href="loans.php">Loans</a>
                     <a href="periods.php">Periods</a>
-                    <a href="mp_profile.php">MP Profile</a>
+                    <a href="loans.php">Reports</a>
+                    <A href="process_payroll.php">Reports</A>
+
                 </div>
-                <div class="tab-nav">
-                    <a href="#cycles" class="tab-link active" onclick="showTab('cycles')">Allowance Types</a>
-                    <a href="#indicators" class="tab-link" onclick="showTab('indicators')">Allowance Allocation</a>
+
+                <!-- Allowance-Specific Tabs -->
+                <div class="tabs mb-3">
+                    <a href="allowances.php?tab=types" class="<?php echo (!isset($_GET['tab']) || $_GET['tab'] === 'types') ? 'active' : ''; ?>">
+                        Allowance Types
+                    </a>
+                    <a href="allowances.php?tab=allocate" class="<?php echo (isset($_GET['tab']) && $_GET['tab'] === 'allocate') ? 'active' : ''; ?>">
+                        Allocate Allowance
+                    </a>
                 </div>
 
                 <?php $flash = getFlashMessage(); if ($flash): ?>
@@ -908,178 +863,176 @@ require_once 'header.php';
                     </div>
                 <?php endif; ?>
 
-                <!-- Allocate to Selected Employees Section -->
-                <?php if (hasPermission('hr_manager')): ?>
-                <div class="bulk-assign-section">
-                    <h4>Allocate Allowances to Selected Employees</h4>
-                    <form method="POST" action="allowances.php">
-                        <input type="hidden" name="allocate_selected" value="1">
-                        
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label" for="alloc_period_id">Period</label>
-                                <select class="form-control" id="alloc_period_id" name="period_id" required>
-                                    <option value="">Select Period</option>
-                                    <?php foreach ($periods as $id => $name): ?>
-                                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label" for="alloc_allowance_type_id">Allowance Type</label>
-                                <select class="form-control" id="alloc_allowance_type_id" name="allowance_type_id" required>
-                                    <option value="">Select Allowance Type</option>
-                                    <?php foreach ($allowanceTypes as $id => $name): ?>
-                                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label><input type="checkbox" name="use_auto_amount" id="use_auto_amount" onclick="toggleAmountInput()"> Use job group based amount</label>
-                            </div>
-                            
-                            <div class="form-group" id="amount_group">
-                                <label class="form-label" for="alloc_amount">Fixed Amount</label>
-                                <input type="number" step="0.01" class="form-control" id="alloc_amount" name="amount" required>
-                            </div>
+                <!-- ALLOWANCE TYPES TAB (default) -->
+                <?php if (!isset($_GET['tab']) || $_GET['tab'] === 'types'): ?>
+                <div class="tab-content active">
+                    <?php if (hasPermission('hr_manager')): ?>
+                    <div class="allowance-types-section">
+                        <div class="d-flex justify-between align-center mb-3">
+                            <h3>Allowance Types</h3>
+                            <button class="btn btn-primary" onclick="document.getElementById('addTypeModal').style.display='block'">
+                                <i class="fas fa-plus"></i> Add Allowance Type
+                            </button>
                         </div>
-                        
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label" for="alloc_effective_date">Effective Date</label>
-                                <input type="date" class="form-control" id="alloc_effective_date" name="effective_date" required>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label" for="alloc_end_date">End Date (Optional)</label>
-                                <input type="date" class="form-control" id="alloc_end_date" name="end_date">
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label" for="alloc_status">Status</label>
-                                <select class="form-control" id="alloc_status" name="status" required>
-                                    <option value="active">Active</option>
-                                    <option value="inactive">Inactive</option>
-                                    <option value="pending">Pending</option>
-                                </select>
-                            </div>
+                        <div class="table-controls">
+                            <form method="GET" action="allowances.php">
+                                <input type="hidden" name="tab" value="types">
+                                <label for="types_search">Search:</label>
+                                <input type="text" id="types_search" name="types_search" value="<?php echo htmlspecialchars($typesFilter); ?>" placeholder="Search by type name or description">
+                                <input type="hidden" name="types_page" value="<?php echo $typesPage; ?>">
+                                <input type="hidden" name="types_rows" value="<?php echo $typesRowsPerPage; ?>">
+                                <input type="hidden" name="types_sort" value="<?php echo $typesSortBy; ?>">
+                                <input type="hidden" name="types_order" value="<?php echo $typesSortOrder; ?>">
+                                <button type="submit" class="btn btn-sm btn-primary">Search</button>
+                            </form>
                         </div>
-                        
-                        <div class="table-container">
-                            <table class="table">
-                                <thead>
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Type Name</th>
+                                    <th>Description</th>
+                                    <th>Active</th>
+                                    <th>Created At</th>
+                                    <th>Updated At</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (empty($allAllowanceTypes)): ?>
                                     <tr>
-                                        <th><input type="checkbox" id="select_all" onclick="toggleSelectAll()"></th>
-                                        <th>Employee Name</th>
-                                        <th>Scale</th>
+                                        <td colspan="6" class="text-center">No allowance types found</td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($employees as $employee): ?>
+                                <?php else: ?>
+                                    <?php foreach ($allAllowanceTypes as $type): ?>
                                     <tr>
-                                        <td><input type="checkbox" name="emp_ids[]" value="<?php echo $employee['id']; ?>" class="emp-checkbox"></td>
-                                        <td><?php echo htmlspecialchars($employee['first_name'] . ' ' . $employee['last_name']); ?></td>
-                                        <td><?php echo htmlspecialchars($employee['scale_id'] ?? 'N/A'); ?></td>
+                                        <td><?php echo htmlspecialchars($type['type_name']); ?></td>
+                                        <td><?php echo htmlspecialchars($type['description']); ?></td>
+                                        <td><?php echo $type['is_active'] ? 'Yes' : 'No'; ?></td>
+                                        <td><?php echo formatDate($type['created_at']); ?></td>
+                                        <td><?php echo formatDate($type['updated_at']); ?></td>
+                                        <td>
+                                            <button class="btn btn-sm btn-primary edit-type-btn" 
+                                                    data-id="<?php echo $type['allowance_type_id']; ?>"
+                                                    data-type-name="<?php echo htmlspecialchars($type['type_name']); ?>"
+                                                    data-description="<?php echo htmlspecialchars($type['description']); ?>"
+                                                    data-is-active="<?php echo $type['is_active']; ?>">
+                                                Edit
+                                            </button>
+                                            <button class="btn btn-sm btn-danger delete-type-btn" 
+                                                    data-id="<?php echo $type['allowance_type_id']; ?>"
+                                                    data-name="<?php echo htmlspecialchars($type['type_name']); ?>">
+                                                Delete
+                                            </button>
+                                        </td>
                                     </tr>
                                     <?php endforeach; ?>
-                                </tbody>
-                            </table>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                        <!-- Pagination for Allowance Types -->
+                        <div class="pagination">
+                            <p>Showing <?php echo min($typesTotalRecords, $typesOffset + 1); ?> to <?php echo min($typesTotalRecords, $typesOffset + $typesRowsPerPage); ?> of <?php echo $typesTotalRecords; ?> entries</p>
+                            <div class="pagination-links">
+                                <?php if ($typesPage > 1): ?>
+                                    <a href="allowances.php?tab=types&types_page=<?php echo $typesPage - 1; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm btn-secondary">Previous</a>
+                                <?php endif; ?>
+                                <?php for ($i = 1; $i <= $typesTotalPages; $i++): ?>
+                                    <a href="allowances.php?tab=types&types_page=<?php echo $i; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm <?php echo $i == $typesPage ? 'btn-primary' : 'btn-secondary'; ?>"><?php echo $i; ?></a>
+                                <?php endfor; ?>
+                                <?php if ($typesPage < $typesTotalPages): ?>
+                                    <a href="allowances.php?tab=types&types_page=<?php echo $typesPage + 1; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm btn-secondary">Next</a>
+                                <?php endif; ?>
+                            </div>
                         </div>
-                        
-                        <button type="submit" class="btn btn-primary">Allocate Allowance</button>
-                    </form>
+                    </div>
+                    <?php endif; ?>
                 </div>
                 <?php endif; ?>
 
-                <!-- Allowance Types Section -->
-                <?php if (hasPermission('hr_manager')): ?>
-                <div class="allowance-types-section">
-                    <div class="d-flex justify-between align-center mb-3">
-                        <h3>Allowance Types</h3>
-                        <button class="btn btn-primary" onclick="document.getElementById('addTypeModal').style.display='block'">
-                            <i class="fas fa-plus"></i> Add Allowance Type
-                        </button>
-                    </div>
-                    
-                    <div class="table-controls">
-                        <form method="GET" action="allowances.php">
-                            <label for="types_search">Search:</label>
-                            <input type="text" id="types_search" name="types_search" value="<?php echo htmlspecialchars($typesFilter); ?>" placeholder="Search by type name or description">
-                            <input type="hidden" name="types_page" value="<?php echo $typesPage; ?>">
-                            <input type="hidden" name="types_rows" value="<?php echo $typesRowsPerPage; ?>">
-                            <input type="hidden" name="types_sort" value="<?php echo $typesSortBy; ?>">
-                            <input type="hidden" name="types_order" value="<?php echo $typesSortOrder; ?>">
-                            <button type="submit" class="btn btn-sm btn-primary">Search</button>
+                <!-- ALLOCATE ALLOWANCE TAB -->
+                <?php if (isset($_GET['tab']) && $_GET['tab'] === 'allocate'): ?>
+                <div class="tab-content active">
+                    <?php if (hasPermission('hr_manager')): ?>
+                    <div class="bulk-assign-section">
+                        <h4>Allocate Allowances to Selected Employees</h4>
+                        <form method="POST" action="allowances.php">
+                            <input type="hidden" name="allocate_selected" value="1">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label class="form-label" for="alloc_period_id">Period</label>
+                                    <select class="form-control" id="alloc_period_id" name="period_id" required>
+                                        <option value="">Select Period</option>
+                                        <?php foreach ($periods as $id => $name): ?>
+                                            <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="alloc_allowance_type_id">Allowance Type</label>
+                                    <select class="form-control" id="alloc_allowance_type_id" name="allowance_type_id" required>
+                                        <option value="">Select Allowance Type</option>
+                                        <?php foreach ($allowanceTypes as $id => $name): ?>
+                                            <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label><input type="checkbox" name="use_auto_amount" id="use_auto_amount" onclick="toggleAmountInput()"> Use job group based amount</label>
+                                </div>
+                                <div class="form-group" id="amount_group">
+                                    <label class="form-label" for="alloc_amount">Fixed Amount</label>
+                                    <input type="number" step="0.01" class="form-control" id="alloc_amount" name="amount" required>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label class="form-label" for="alloc_effective_date">Effective Date</label>
+                                    <input type="date" class="form-control" id="alloc_effective_date" name="effective_date" required>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="alloc_end_date">End Date (Optional)</label>
+                                    <input type="date" class="form-control" id="alloc_end_date" name="end_date">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="alloc_status">Status</label>
+                                    <select class="form-control" id="alloc_status" name="status" required>
+                                        <option value="active">Active</option>
+                                        <option value="inactive">Inactive</option>
+                                        <option value="pending">Pending</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="table-container">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th><input type="checkbox" id="select_all" onclick="toggleSelectAll()"></th>
+                                            <th>Employee Name</th>
+                                            <th>Scale</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($employees as $employee): ?>
+                                        <tr>
+                                            <td><input type="checkbox" name="emp_ids[]" value="<?php echo $employee['id']; ?>" class="emp-checkbox"></td>
+                                            <td><?php echo htmlspecialchars($employee['first_name'] . ' ' . $employee['last_name']); ?></td>
+                                            <td><?php echo htmlspecialchars($employee['scale_id'] ?? 'N/A'); ?></td>
+                                        </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Allocate Allowance</button>
                         </form>
                     </div>
-                    
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>Type Name</th>
-                                <th>Description</th>
-                                <th>Active</th>
-                                <th>Created At</th>
-                                <th>Updated At</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($allAllowanceTypes)): ?>
-                                <tr>
-                                    <td colspan="6" class="text-center">No allowance types found</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($allAllowanceTypes as $type): ?>
-                                <tr>
-                                    <td><?php echo htmlspecialchars($type['type_name']); ?></td>
-                                    <td><?php echo htmlspecialchars($type['description']); ?></td>
-                                    <td><?php echo $type['is_active'] ? 'Yes' : 'No'; ?></td>
-                                    <td><?php echo formatDate($type['created_at']); ?></td>
-                                    <td><?php echo formatDate($type['updated_at']); ?></td>
-                                    <td>
-                                        <button class="btn btn-sm btn-primary edit-type-btn" 
-                                                data-id="<?php echo $type['allowance_type_id']; ?>"
-                                                data-type-name="<?php echo htmlspecialchars($type['type_name']); ?>"
-                                                data-description="<?php echo htmlspecialchars($type['description']); ?>"
-                                                data-is-active="<?php echo $type['is_active']; ?>">
-                                            Edit
-                                        </button>
-                                        <button class="btn btn-sm btn-danger delete-type-btn" 
-                                                data-id="<?php echo $type['allowance_type_id']; ?>"
-                                                data-name="<?php echo htmlspecialchars($type['type_name']); ?>">
-                                            Delete
-                                        </button>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-
-                    <!-- Pagination for Allowance Types -->
-                    <div class="pagination">
-                        <p>Showing <?php echo min($typesTotalRecords, $typesOffset + 1); ?> to <?php echo min($typesTotalRecords, $typesOffset + $typesRowsPerPage); ?> of <?php echo $typesTotalRecords; ?> entries</p>
-                        <div class="pagination-links">
-                            <?php if ($typesPage > 1): ?>
-                                <a href="allowances.php?types_page=<?php echo $typesPage - 1; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm btn-secondary">Previous</a>
-                            <?php endif; ?>
-                            <?php for ($i = 1; $i <= $typesTotalPages; $i++): ?>
-                                <a href="allowances.php?types_page=<?php echo $i; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm <?php echo $i == $typesPage ? 'btn-primary' : 'btn-secondary'; ?>"><?php echo $i; ?></a>
-                            <?php endfor; ?>
-                            <?php if ($typesPage < $typesTotalPages): ?>
-                                <a href="allowances.php?types_page=<?php echo $typesPage + 1; ?>&types_rows=<?php echo $typesRowsPerPage; ?>&types_sort=<?php echo $typesSortBy; ?>&types_order=<?php echo $typesSortOrder; ?>&types_search=<?php echo urlencode($typesFilter); ?>" class="btn btn-sm btn-secondary">Next</a>
-                            <?php endif; ?>
-                        </div>
-                    </div>
+                    <?php endif; ?>
                 </div>
                 <?php endif; ?>
             </div>
         </div>
     </div>
 
+    <!-- === MODALS (unchanged, kept at bottom) === -->
     <!-- Add Allowance Modal -->
     <div id="addModal" class="modal">
         <div class="modal-dialog">
@@ -1091,7 +1044,6 @@ require_once 'header.php';
                 <form method="POST" action="allowances.php" id="addAllowanceForm">
                     <div class="modal-body">
                         <input type="hidden" name="add_allowance" value="1">
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_emp_id">Employee</label>
                             <select class="form-control" id="add_emp_id" name="emp_id" required onchange="updateAllowanceAmount()">
@@ -1101,7 +1053,6 @@ require_once 'header.php';
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_allowance_type_id">Allowance Type</label>
                             <select class="form-control" id="add_allowance_type_id" name="allowance_type_id" required onchange="updateAllowanceAmount()">
@@ -1111,25 +1062,21 @@ require_once 'header.php';
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_amount">Amount (Automatically determined by job group)</label>
                             <input type="text" class="form-control" id="add_amount_display" readonly>
                             <small class="text-muted">This amount is based on the employee's job group</small>
                         </div>
-                        
                         <div class="form-row">
                             <div class="form-group">
                                 <label class="form-label" for="add_effective_date">Effective Date</label>
                                 <input type="date" class="form-control" id="add_effective_date" name="effective_date" required>
                             </div>
-                            
                             <div class="form-group">
                                 <label class="form-label" for="add_end_date">End Date (Optional)</label>
                                 <input type="date" class="form-control" id="add_end_date" name="end_date">
                             </div>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_status">Status</label>
                             <select class="form-control" id="add_status" name="status" required>
@@ -1160,7 +1107,6 @@ require_once 'header.php';
                     <div class="modal-body">
                         <input type="hidden" name="allowance_id" id="edit_allowance_id">
                         <input type="hidden" name="update_allowance" value="1">
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_emp_id">Employee</label>
                             <select class="form-control" id="edit_emp_id" name="emp_id" disabled>
@@ -1170,7 +1116,6 @@ require_once 'header.php';
                             </select>
                             <small class="text-muted">Employee cannot be changed</small>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_allowance_type_id">Allowance Type</label>
                             <select class="form-control" id="edit_allowance_type_id" name="allowance_type_id" required>
@@ -1180,24 +1125,20 @@ require_once 'header.php';
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_amount">Amount</label>
                             <input type="number" step="0.01" class="form-control" id="edit_amount" name="amount" required>
                         </div>
-                        
                         <div class="form-row">
                             <div class="form-group">
                                 <label class="form-label" for="edit_effective_date">Effective Date</label>
                                 <input type="date" class="form-control" id="edit_effective_date" name="effective_date" required>
                             </div>
-                            
                             <div class="form-group">
                                 <label class="form-label" for="edit_end_date">End Date (Optional)</label>
                                 <input type="date" class="form-control" id="edit_end_date" name="end_date">
                             </div>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_status">Status</label>
                             <select class="form-control" id="edit_status" name="status" required>
@@ -1247,17 +1188,14 @@ require_once 'header.php';
                 <form method="POST" action="allowances.php">
                     <div class="modal-body">
                         <input type="hidden" name="add_allowance_type" value="1">
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_type_name">Type Name</label>
                             <input type="text" class="form-control" id="add_type_name" name="type_name" required>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_description">Description</label>
                             <textarea class="form-control" id="add_description" name="description" rows="4"></textarea>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="add_is_active">Active</label>
                             <input type="checkbox" id="add_is_active" name="is_active" checked>
@@ -1284,17 +1222,14 @@ require_once 'header.php';
                     <div class="modal-body">
                         <input type="hidden" name="allowance_type_id" id="edit_type_id">
                         <input type="hidden" name="update_allowance_type" value="1">
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_type_name">Type Name</label>
                             <input type="text" class="form-control" id="edit_type_name" name="type_name" required>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_description">Description</label>
                             <textarea class="form-control" id="edit_description" name="description" rows="4"></textarea>
                         </div>
-                        
                         <div class="form-group">
                             <label class="form-label" for="edit_is_active">Active</label>
                             <input type="checkbox" id="edit_is_active" name="is_active">
@@ -1332,7 +1267,7 @@ require_once 'header.php';
     <script>
         // Handle edit button clicks for allowances
         document.querySelectorAll('.edit-btn').forEach(button => {
-            button.addEventListener('click', function() {
+            button.addEventListener('click', function () {
                 const allowanceId = this.getAttribute('data-id');
                 const empId = this.getAttribute('data-emp-id');
                 const typeId = this.getAttribute('data-type-id');
@@ -1340,7 +1275,6 @@ require_once 'header.php';
                 const effectiveDate = this.getAttribute('data-effective-date');
                 const endDate = this.getAttribute('data-end-date');
                 const status = this.getAttribute('data-status');
-                
                 document.getElementById('edit_allowance_id').value = allowanceId;
                 document.getElementById('edit_emp_id').value = empId;
                 document.getElementById('edit_allowance_type_id').value = typeId;
@@ -1348,93 +1282,76 @@ require_once 'header.php';
                 document.getElementById('edit_effective_date').value = effectiveDate;
                 document.getElementById('edit_end_date').value = endDate;
                 document.getElementById('edit_status').value = status;
-                
                 document.getElementById('editModal').style.display = 'block';
             });
         });
-        
         // Handle delete button clicks for allowances
         document.querySelectorAll('.delete-btn').forEach(button => {
-            button.addEventListener('click', function() {
+            button.addEventListener('click', function () {
                 const allowanceId = this.getAttribute('data-id');
                 const name = this.getAttribute('data-name');
-                
                 document.getElementById('delete_allowance_name').textContent = name;
                 document.getElementById('delete_confirm_btn').href = `allowances.php?action=delete&id=${allowanceId}`;
-                
                 document.getElementById('deleteModal').style.display = 'block';
             });
         });
-        
         // Handle edit button clicks for allowance types
         document.querySelectorAll('.edit-type-btn').forEach(button => {
-            button.addEventListener('click', function() {
+            button.addEventListener('click', function () {
                 const typeId = this.getAttribute('data-id');
                 const typeName = this.getAttribute('data-type-name');
                 const description = this.getAttribute('data-description');
                 const isActive = this.getAttribute('data-is-active') === '1';
-                
                 document.getElementById('edit_type_id').value = typeId;
                 document.getElementById('edit_type_name').value = typeName;
                 document.getElementById('edit_description').value = description;
                 document.getElementById('edit_is_active').checked = isActive;
-                
                 document.getElementById('editTypeModal').style.display = 'block';
             });
         });
-        
         // Handle delete button clicks for allowance types
         document.querySelectorAll('.delete-type-btn').forEach(button => {
-            button.addEventListener('click', function() {
+            button.addEventListener('click', function () {
                 const typeId = this.getAttribute('data-id');
                 const name = this.getAttribute('data-name');
-                
                 document.getElementById('delete_type_name').textContent = name;
                 document.getElementById('delete_type_confirm_btn').href = `allowances.php?action=delete_allowance_type&id=${typeId}`;
-                
                 document.getElementById('deleteTypeModal').style.display = 'block';
             });
         });
-        
         // Close modals when clicking on X
         document.querySelectorAll('.close').forEach(button => {
-            button.addEventListener('click', function() {
+            button.addEventListener('click', function () {
                 this.closest('.modal').style.display = 'none';
             });
         });
-
         // Close modals when clicking outside
-        window.addEventListener('click', function(event) {
+        window.addEventListener('click', function (event) {
             if (event.target.classList.contains('modal')) {
                 event.target.style.display = 'none';
             }
         });
-        
         // Open add modal for allowances
-        document.querySelector('[onclick*="addModal"]').addEventListener('click', function() {
+        document.querySelector('[onclick*="addModal"]').addEventListener('click', function () {
             document.getElementById('addModal').style.display = 'block';
         });
-        
         // Open add modal for allowance types
-        document.querySelector('[onclick*="addTypeModal"]').addEventListener('click', function() {
+        document.querySelector('[onclick*="addTypeModal"]').addEventListener('click', function () {
             document.getElementById('addTypeModal').style.display = 'block';
         });
-        
         // Function to update allowance amount based on employee and allowance type
         function updateAllowanceAmount() {
             const empId = document.getElementById('add_emp_id').value;
             const allowanceTypeId = document.getElementById('add_allowance_type_id').value;
             const amountDisplay = document.getElementById('add_amount_display');
-            
             if (!empId || !allowanceTypeId) {
                 amountDisplay.value = '';
                 return;
             }
-            
             const xhr = new XMLHttpRequest();
             xhr.open('POST', 'allowances.php', true);
             xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-            xhr.onload = function() {
+            xhr.onload = function () {
                 if (this.status === 200) {
                     const response = JSON.parse(this.responseText);
                     if (response.success) {
@@ -1448,15 +1365,14 @@ require_once 'header.php';
             };
             xhr.send(`get_amount=1&emp_id=${encodeURIComponent(empId)}&allowance_type_id=${encodeURIComponent(allowanceTypeId)}`);
         }
-        
         // Toggle amount input for allocation
         function toggleAmountInput() {
             const checkbox = document.getElementById('use_auto_amount');
             const amountGroup = document.getElementById('amount_group');
+            const amountInput = document.getElementById('alloc_amount');
             amountGroup.style.display = checkbox.checked ? 'none' : 'block';
-            document.getElementById('alloc_amount').required = !checkbox.checked;
+            amountInput.required = !checkbox.checked;
         }
-
         // Toggle select all checkboxes
         function toggleSelectAll() {
             const selectAllCheckbox = document.getElementById('select_all');

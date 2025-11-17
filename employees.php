@@ -2,45 +2,91 @@
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
-
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
-
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 require_once 'config.php';
-
-// Get database connection
+require_once 'auth.php';
 $conn = getConnection();
 
-// Get current user from session
+// Get current user
 $user = [
     'first_name' => isset($_SESSION['user_name']) ? explode(' ', $_SESSION['user_name'])[0] : 'User',
     'last_name' => isset($_SESSION['user_name']) ? (explode(' ', $_SESSION['user_name'])[1] ?? '') : '',
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' =>4 ,
-        'managing_director'=>3,
-        'dept_head' => 2,
-        'section head'=>1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
+
+// === HELPER FUNCTIONS ===
+
+/**
+ * Improved parameter binding with validation
+ */
+function bindParameters($stmt, $types, $params) {
+    if (strlen($types) !== count($params)) {
+        throw new Exception("Parameter count mismatch: types='$types', params=" . count($params));
+    }
+    $stmt->bind_param($types, ...$params);
 }
 
+/**
+ * Returns the organizational scope for a leadership role.
+ */
+function getLeadershipScope($employee_type) {
+    $scopes = [
+        'managing_director' => 'organization',
+        'dept_head'         => 'department',
+        'section_head'      => 'section',
+        'sub_section_head'  => 'subsection'
+    ];
+    return $scopes[$employee_type] ?? null;
+}
 
-// Helper functions
+/**
+ * Validates that no other employee holds the same leadership role in the same scope.
+ */
+function validateLeadershipUniqueness($conn, $employee_type, $department_id = null, $section_id = null, $subsection_id = null, $exclude_id = null) {
+    $scope = getLeadershipScope($employee_type);
+    if (!$scope) return true; // Not a leadership role
+
+    $sql = "SELECT id FROM employees WHERE employee_type = ?";
+    $params = [$employee_type];
+    $types = "s";
+
+    if ($scope === 'department' && $department_id) {
+        $sql .= " AND department_id = ?";
+        $params[] = $department_id;
+        $types .= "i";
+    } elseif ($scope === 'section' && $section_id) {
+        $sql .= " AND section_id = ?";
+        $params[] = $section_id;
+        $types .= "i";
+    } elseif ($scope === 'subsection' && $subsection_id) {
+        $sql .= " AND subsection_id = ?";
+        $params[] = $subsection_id;
+        $types .= "i";
+    }
+
+    if ($exclude_id) {
+        $sql .= " AND id != ?";
+        $params[] = $exclude_id;
+        $types .= "i";
+    }
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) return false;
+    
+    bindParameters($stmt, $types, $params);
+    $stmt->execute();
+    return $stmt->get_result()->num_rows === 0;
+}
+
 function getEmployeeTypeBadge($type) {
     $badges = [
         'full_time' => 'badge-primary',
@@ -89,27 +135,86 @@ function redirectWithMessage($url, $message, $type = 'info') {
 }
 
 function sanitizeInput($data) {
-    if ($data === null) {
-        return '';
-    }
-    return htmlspecialchars(stripslashes(trim($data)));
+    if ($data === null) return '';
+    return htmlspecialchars(stripslashes(trim($data)), ENT_QUOTES, 'UTF-8');
 }
 
-// Get departments and sections for forms
-$departments = $conn->query("SELECT * FROM departments ORDER BY name")->fetch_all(MYSQLI_ASSOC);
-$sections = $conn->query("SELECT s.*, d.name as department_name FROM sections s LEFT JOIN departments d ON s.department_id = d.id ORDER BY d.name, s.name")->fetch_all(MYSQLI_ASSOC);
+function prepareNextOfKin($post_data) {
+    $next_of_kin_array = [];
+    $nok_count = count($post_data['next_of_kin_name'] ?? []);
+    
+    for ($i = 0; $i < $nok_count; $i++) {
+        $name = sanitizeInput($post_data['next_of_kin_name'][$i] ?? '');
+        $relationship = sanitizeInput($post_data['next_of_kin_relationship'][$i] ?? '');
+        $contact = sanitizeInput($post_data['next_of_kin_contact'][$i] ?? '');
+        
+        if (!empty($name)) {
+            $next_of_kin_array[] = [
+                'name' => $name,
+                'relationship' => $relationship,
+                'contact' => $contact
+            ];
+        }
+    }
+    
+    return json_encode($next_of_kin_array, JSON_UNESCAPED_UNICODE);
+}
 
-// Employees data (only if HR)
+function getUserRoleFromEmployeeType($employee_type) {
+    $role_mapping = [
+        'managing_director' => 'managing_director',
+        'bod_chairman' => 'bod_chairman',
+        'super_admin' => 'super_admin',
+        'dept_head' => 'dept_head',
+        'hr_manager' => 'hr_manager',
+        'manager' => 'manager',
+        'section_head' => 'section_head',
+        'sub_section_head' => 'sub_section_head'
+    ];
+    
+    return $role_mapping[$employee_type] ?? 'employee';
+}
+
+// === DATA FETCHING ===
+
+$departments = $conn->query("SELECT * FROM departments ORDER BY name")->fetch_all(MYSQLI_ASSOC);
+$sections = $conn->query("
+    SELECT s.*, d.name as department_name 
+    FROM sections s 
+    LEFT JOIN departments d ON s.department_id = d.id 
+    ORDER BY d.name, s.name
+")->fetch_all(MYSQLI_ASSOC);
+
+$subsections = $conn->query("
+    SELECT ss.*, s.name as section_name, d.name as department_name 
+    FROM subsections ss 
+    LEFT JOIN sections s ON ss.section_id = s.id 
+    LEFT JOIN departments d ON ss.department_id = d.id 
+    ORDER BY d.name, s.name, ss.name
+")->fetch_all(MYSQLI_ASSOC);
+
+// Employee filters & data (HR only)
 $employees = [];
+$search = $department_filter = $section_filter = $type_filter = $status_filter = '';
+$total = 0;
+$totalPages = 1;
+
 if (hasPermission('hr_manager')) {
-    $search = $_GET['search'] ?? '';
-    $department_filter = $_GET['department'] ?? '';
-    $section_filter = $_GET['section'] ?? '';
-    $type_filter = $_GET['type'] ?? '';
-    $status_filter = $_GET['status'] ?? '';
+    $limit = 30;
+    $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+    $offset = ($page - 1) * $limit;
+    
+    // Get filter parameters
+    $search = sanitizeInput($_GET['search'] ?? '');
+    $department_filter = sanitizeInput($_GET['department'] ?? '');
+    $section_filter = sanitizeInput($_GET['section'] ?? '');
+    $type_filter = sanitizeInput($_GET['type'] ?? '');
+    $status_filter = sanitizeInput($_GET['status'] ?? '');
+
     $where_conditions = [];
     $params = [];
     $types = '';
+
     if (!empty($search)) {
         $where_conditions[] = "(e.first_name LIKE ? OR e.last_name LIKE ? OR e.employee_id LIKE ? OR e.email LIKE ?)";
         $search_param = "%$search%";
@@ -136,118 +241,67 @@ if (hasPermission('hr_manager')) {
         $params[] = $status_filter;
         $types .= 's';
     }
+
     $where_clause = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
+
+    // Count total records
+    $countQuery = "SELECT COUNT(*) as total FROM employees e $where_clause";
+    $countStmt = $conn->prepare($countQuery);
+    if (!empty($params)) {
+        bindParameters($countStmt, $types, $params);
+    }
+    $countStmt->execute();
+    $total = $countStmt->get_result()->fetch_assoc()['total'];
+    $totalPages = ceil($total / $limit);
+
+    // Fetch employees
     $query = "
         SELECT e.*,
                COALESCE(e.first_name, '') as first_name,
                COALESCE(e.last_name, '') as last_name,
                d.name as department_name,
-               s.name as section_name
+               s.name as section_name,
+               ss.name as subsection_name
         FROM employees e
         LEFT JOIN departments d ON e.department_id = d.id
         LEFT JOIN sections s ON e.section_id = s.id
+        LEFT JOIN subsections ss ON e.subsection_id = ss.id
         $where_clause
         ORDER BY e.created_at DESC
+        LIMIT ? OFFSET ?
     ";
+    
     $stmt = $conn->prepare($query);
-    if (!empty($params)) {
-        $stmt->bind_param($types, ...$params);
+    if (!$stmt) {
+        die("Database error: " . $conn->error);
     }
+    
+    // Add limit and offset parameters
+    $params[] = $limit;
+    $params[] = $offset;
+    $types .= 'ii';
+    
+    bindParameters($stmt, $types, $params);
     $stmt->execute();
     $result = $stmt->get_result();
     $employees = $result->fetch_all(MYSQLI_ASSOC);
 }
 
-// Define job groups
 $job_groups = ['1', '2', '3', '3A', '3B', '3C', '4', '5', '6', '7', '8', '9', '10'];
 
-// Handle form submissions
+// === FORM PROCESSING ===
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && hasPermission('hr_manager')) {
-    if (isset($_POST['action'])) {
-        $action = $_POST['action'];
+    $action = sanitizeInput($_POST['action'] ?? '');
+    
+    try {
         if ($action === 'add') {
+            // Sanitize and validate input
             $employee_id = sanitizeInput($_POST['employee_id']);
             $first_name = sanitizeInput($_POST['first_name']);
             $last_name = sanitizeInput($_POST['last_name']);
-            $gender = isset($_POST['gender']) ? sanitizeInput($_POST['gender']) : '';
-            $national_id = sanitizeInput($_POST['national_id']);
-            $email = sanitizeInput($_POST['email']);
-            $phone = sanitizeInput($_POST['phone']);
-            $address = sanitizeInput($_POST['address']);
-            $date_of_birth = $_POST['date_of_birth'];
-            $hire_date = $_POST['hire_date'];
-            $designation = sanitizeInput($_POST['designation']) ?: 'Employee';
-            $department_id = !empty($_POST['department_id']) ? $_POST['department_id'] : null;
-            $section_id = !empty($_POST['section_id']) ? $_POST['section_id'] : null;
-            $employee_type = $_POST['employee_type'];
-            $employment_type = $_POST['employment_type'] ?: 'permanent';
-            $job_group = in_array($_POST['job_group'], $job_groups) ? $_POST['job_group'] : null;
-
-            // Handle multiple next of kin as JSON
-            $next_of_kin_array = [];
-            $nok_count = count($_POST['next_of_kin_name'] ?? []);
-            for ($i = 0; $i < $nok_count; $i++) {
-                $name = sanitizeInput($_POST['next_of_kin_name'][$i] ?? '');
-                $relationship = sanitizeInput($_POST['next_of_kin_relationship'][$i] ?? '');
-                $contact = sanitizeInput($_POST['next_of_kin_contact'][$i] ?? '');
-                if (!empty($name)) {
-                    $next_of_kin_array[] = [
-                        'name' => $name,
-                        'relationship' => $relationship,
-                        'contact' => $contact
-                    ];
-                }
-            }
-            $next_of_kin = json_encode($next_of_kin_array);
-
-            try {
-                $conn->begin_transaction();
-                $stmt = $conn->prepare("INSERT INTO employees (employee_id, first_name, last_name, gender, national_id, phone, email, date_of_birth, designation, department_id, section_id, employee_type, employment_type, address, hire_date, job_group, next_of_kin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->bind_param("sssssssssiissssss", $employee_id, $first_name, $last_name, $gender, $national_id, $phone, $email, $date_of_birth, $designation, $department_id, $section_id, $employee_type, $employment_type, $address, $hire_date, $job_group, $next_of_kin);
-                $stmt->execute();
-                $new_employee_id = $conn->insert_id;
-                $payroll_status = 'active';
-                $payroll_stmt = $conn->prepare("INSERT INTO payroll (emp_id, employment_type, status, job_group) VALUES (?, ?, ?, ?)");
-                $payroll_stmt->bind_param("isss", $new_employee_id, $employment_type, $payroll_status, $job_group);
-                $payroll_stmt->execute();
-                $user_role = 'employee';
-                switch($employee_type) {
-                    case 'managing_director':
-                    case 'bod_chairman':
-                        $user_role = 'super_admin';
-                        break;
-                    case 'dept_head':
-                        $user_role = 'dept_head';
-                        break;
-                    case 'hr_manager':
-                        $user_role = 'hr_manager';
-                        break;
-                    case 'manager':
-                        $user_role = 'manager';
-                        break;
-                    case 'section_head':
-                        $user_role = 'section_head';
-                        break;
-                    default:
-                        $user_role = 'employee';
-                        break;
-                }
-                $hashed_password = password_hash($employee_id, PASSWORD_DEFAULT);
-                $user_stmt = $conn->prepare("INSERT INTO users (email, first_name, last_name, gender, password, role, phone, address, employee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
-                $user_stmt->bind_param("sssssssss", $email, $first_name, $last_name, $gender, $hashed_password, $user_role, $phone, $address, $employee_id);
-                $user_stmt->execute();
-                $conn->commit();
-                redirectWithMessage('employees.php', 'Employee, user account, and payroll entry created successfully! Default password is the employee ID.', 'success');
-            } catch (Exception $e) {
-                $conn->rollback();
-                $error = 'Error adding employee: ' . $e->getMessage();
-            }
-        } elseif ($action === 'edit') {
-            $id = $_POST['id'];
-            $employee_id = sanitizeInput($_POST['employee_id']);
-            $first_name = sanitizeInput($_POST['first_name']);
-            $last_name = sanitizeInput($_POST['last_name']);
-            $gender = isset($_POST['gender']) ? sanitizeInput($_POST['gender']) : '';
+            $surname = sanitizeInput($_POST['surname'] ?? '');
+            $gender = sanitizeInput($_POST['gender'] ?? '');
             $national_id = sanitizeInput($_POST['national_id']);
             $email = sanitizeInput($_POST['email']);
             $phone = sanitizeInput($_POST['phone']);
@@ -255,79 +309,141 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && hasPermission('hr_manager')) {
             $date_of_birth = $_POST['date_of_birth'];
             $hire_date = $_POST['hire_date'];
             $designation = sanitizeInput($_POST['designation']);
-            $department_id = !empty($_POST['department_id']) ? $_POST['department_id'] : null;
-            $section_id = !empty($_POST['section_id']) ? $_POST['section_id'] : null;
+            $department_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null;
+            $section_id = !empty($_POST['section_id']) ? (int)$_POST['section_id'] : null;
+            $subsection_id = !empty($_POST['subsection_id']) ? (int)$_POST['subsection_id'] : null;
+            $employee_type = $_POST['employee_type'];
+            $employment_type = $_POST['employment_type'] ?: 'permanent';
+            $job_group = in_array($_POST['job_group'], $job_groups) ? $_POST['job_group'] : null;
+
+            // Validate leadership uniqueness
+            if (!validateLeadershipUniqueness($conn, $employee_type, $department_id, $section_id, $subsection_id)) {
+                $role_name = ucwords(str_replace('_', ' ', $employee_type));
+                $unit = match(getLeadershipScope($employee_type)) {
+                    'organization' => 'the organization',
+                    'department'   => 'this department',
+                    'section'      => 'this section',
+                    'subsection'   => 'this subsection',
+                    default        => 'this unit'
+                };
+                redirectWithMessage('employees.php', "A {$role_name} already exists in {$unit}. Only one is allowed.", 'danger');
+            }
+
+            // Prepare next of kin data
+            $next_of_kin = prepareNextOfKin($_POST);
+
+            $conn->begin_transaction();
+
+            // Insert employee
+            $stmt = $conn->prepare("INSERT INTO employees (employee_id, first_name, last_name, surname, gender, national_id, phone, email, date_of_birth, designation, department_id, section_id, subsection_id, employee_type, employment_type, address, hire_date, scale_id, next_of_kin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            bindParameters($stmt, "ssssssssssiiiisssss", [
+                $employee_id, $first_name, $last_name, $surname, $gender, $national_id, $phone, $email, 
+                $date_of_birth, $designation, $department_id, $section_id, $subsection_id, $employee_type, 
+                $employment_type, $address, $hire_date, $job_group, $next_of_kin
+            ]);
+            $stmt->execute();
+            $new_employee_id = $conn->insert_id;
+
+            // Generate profile token
+            $token = hash('sha256', random_bytes(32) . $new_employee_id . time());
+            $token_stmt = $conn->prepare("UPDATE employees SET profile_token = ? WHERE id = ?");
+            bindParameters($token_stmt, "si", [$token, $new_employee_id]);
+            $token_stmt->execute();
+
+            // Create payroll entry
+            $payroll_status = 'active';
+            $payroll_stmt = $conn->prepare("INSERT INTO payroll (emp_id, employment_type, status, job_group) VALUES (?, ?, ?, ?)");
+            bindParameters($payroll_stmt, "isss", [$new_employee_id, $employment_type, $payroll_status, $job_group]);
+            $payroll_stmt->execute();
+
+            // Create user account
+            $user_role = getUserRoleFromEmployeeType($employee_type);
+            $hashed_password = password_hash($employee_id, PASSWORD_DEFAULT);
+            $user_stmt = $conn->prepare("INSERT INTO users (email, first_name, last_name, gender, password, role, phone, address, employee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
+            bindParameters($user_stmt, "sssssssss", [
+                $email, $first_name, $last_name, $gender, $hashed_password, $user_role, $phone, $address, $employee_id
+            ]);
+            $user_stmt->execute();
+
+            $conn->commit();
+            redirectWithMessage('employees.php', 'Employee, user account, and payroll entry created successfully! Default password is the employee ID.', 'success');
+
+        } elseif ($action === 'edit') {
+            $id = (int)($_POST['id'] ?? 0);
+            $employee_id = sanitizeInput($_POST['employee_id']);
+            $first_name = sanitizeInput($_POST['first_name']);
+            $last_name = sanitizeInput($_POST['last_name']);
+            $surname = sanitizeInput($_POST['surname'] ?? '');
+            $gender = sanitizeInput($_POST['gender'] ?? '');
+            $national_id = sanitizeInput($_POST['national_id']);
+            $email = sanitizeInput($_POST['email']);
+            $phone = sanitizeInput($_POST['phone']);
+            $address = sanitizeInput($_POST['address']);
+            $date_of_birth = $_POST['date_of_birth'];
+            $hire_date = $_POST['hire_date'];
+            $designation = sanitizeInput($_POST['designation']);
+            $department_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null;
+            $section_id = !empty($_POST['section_id']) ? (int)$_POST['section_id'] : null;
+            $subsection_id = !empty($_POST['subsection_id']) ? (int)$_POST['subsection_id'] : null;
             $employee_type = $_POST['employee_type'];
             $employment_type = $_POST['employment_type'];
             $employee_status = $_POST['employee_status'];
             $job_group = in_array($_POST['job_group'], $job_groups) ? $_POST['job_group'] : null;
 
-            // Handle multiple next of kin as JSON
-            $next_of_kin_array = [];
-            $nok_count = count($_POST['next_of_kin_name'] ?? []);
-            for ($i = 0; $i < $nok_count; $i++) {
-                $name = sanitizeInput($_POST['next_of_kin_name'][$i] ?? '');
-                $relationship = sanitizeInput($_POST['next_of_kin_relationship'][$i] ?? '');
-                $contact = sanitizeInput($_POST['next_of_kin_contact'][$i] ?? '');
-                if (!empty($name)) {
-                    $next_of_kin_array[] = [
-                        'name' => $name,
-                        'relationship' => $relationship,
-                        'contact' => $contact
-                    ];
-                }
+            // Validate leadership uniqueness (excluding self)
+            if (!validateLeadershipUniqueness($conn, $employee_type, $department_id, $section_id, $subsection_id, $id)) {
+                $role_name = ucwords(str_replace('_', ' ', $employee_type));
+                $unit = match(getLeadershipScope($employee_type)) {
+                    'organization' => 'the organization',
+                    'department'   => 'this department',
+                    'section'      => 'this section',
+                    'subsection'   => 'this subsection',
+                    default        => 'this unit'
+                };
+                redirectWithMessage('employees.php', "A {$role_name} already exists in {$unit}. Only one is allowed.", 'danger');
             }
-            $next_of_kin = json_encode($next_of_kin_array);
 
-            try {
-                $conn->begin_transaction();
-                $current_emp_stmt = $conn->prepare("SELECT employee_id FROM employees WHERE id = ?");
-                $current_emp_stmt->bind_param("i", $id);
-                $current_emp_stmt->execute();
-                $current_emp_result = $current_emp_stmt->get_result();
-                $current_employee = $current_emp_result->fetch_assoc();
-                $old_employee_id = $current_employee['employee_id'];
-                $stmt = $conn->prepare("UPDATE employees SET employee_id=?, first_name=?, last_name=?, gender=?, national_id=?, email=?, phone=?, address=?, date_of_birth=?, hire_date=?, designation=?, department_id=?, section_id=?, employee_type=?, employment_type=?, employee_status=?, job_group=?, next_of_kin=?, updated_at=NOW() WHERE id=?");
-                $stmt->bind_param("ssssssssssiissssssi", $employee_id, $first_name, $last_name, $gender, $national_id, $email, $phone, $address, $date_of_birth, $hire_date, $designation, $department_id, $section_id, $employee_type, $employment_type, $employee_status, $job_group, $next_of_kin, $id);
-                if (!$stmt->execute()) {
-                    throw new Exception("Execute failed: (" . $stmt->errno . ") " . $stmt->error);
-                }
-                $payroll_status = ($employee_status === 'active') ? 'active' : 'inactive';
-                $payroll_stmt = $conn->prepare("UPDATE payroll SET job_group = ?, employment_type = ?, status = ? WHERE emp_id = ?");
-                $payroll_stmt->bind_param("sssi", $job_group, $employment_type, $payroll_status, $id);
-                $payroll_stmt->execute();
-                $user_role = 'employee';
-                switch($employee_type) {
-                    case 'managing_director':
-                    case 'bod_chairman':
-                        $user_role = 'super_admin';
-                        break;
-                    case 'dept_head':
-                        $user_role = 'dept_head';
-                        break;
-                    case 'hr_manager':
-                        $user_role = 'hr_manager';
-                        break;
-                    case 'manager':
-                        $user_role = 'manager';
-                        break;
-                    case 'section_head':
-                        $user_role = 'section_head';
-                        break;
-                    default:
-                        $user_role = 'employee';
-                        break;
-                }
-                $user_update_stmt = $conn->prepare("UPDATE users SET email=?, first_name=?, last_name=?, gender=?, role=?, phone=?, address=?, employee_id=?, updated_at=NOW() WHERE employee_id=?");
-                $user_update_stmt->bind_param("sssssssss", $email, $first_name, $last_name, $gender, $user_role, $phone, $address, $employee_id, $old_employee_id);
-                $user_update_stmt->execute();
-                $conn->commit();
-                redirectWithMessage('employees.php', 'Employee and user account updated successfully!', 'success');
-            } catch (Exception $e) {
-                $conn->rollback();
-                $error = 'Error updating employee: ' . $e->getMessage();
-            }
+            // Prepare next of kin data
+            $next_of_kin = prepareNextOfKin($_POST);
+
+            $conn->begin_transaction();
+
+            // Get current employee ID for user update
+            $current_emp_stmt = $conn->prepare("SELECT employee_id FROM employees WHERE id = ?");
+            bindParameters($current_emp_stmt, "i", [$id]);
+            $current_emp_stmt->execute();
+            $current_employee = $current_emp_stmt->get_result()->fetch_assoc();
+            $old_employee_id = $current_employee['employee_id'];
+
+            // Update employee
+            $stmt = $conn->prepare("UPDATE employees SET employee_id=?, first_name=?, last_name=?, surname=?, gender=?, national_id=?, email=?, phone=?, address=?, date_of_birth=?, hire_date=?, designation=?, department_id=?, section_id=?, subsection_id=?, employee_type=?, employment_type=?, employee_status=?, scale_id=?, next_of_kin=?, updated_at=NOW() WHERE id=?");
+            bindParameters($stmt, "sssssssssssiiissssssi", [
+                $employee_id, $first_name, $last_name, $surname, $gender, $national_id, $email, $phone, 
+                $address, $date_of_birth, $hire_date, $designation, $department_id, $section_id, $subsection_id, 
+                $employee_type, $employment_type, $employee_status, $job_group, $next_of_kin, $id
+            ]);
+            $stmt->execute();
+
+            // Update payroll
+            $payroll_status = ($employee_status === 'active') ? 'active' : 'inactive';
+            $payroll_stmt = $conn->prepare("UPDATE payroll SET job_group = ?, employment_type = ?, status = ? WHERE emp_id = ?");
+            bindParameters($payroll_stmt, "sssi", [$job_group, $employment_type, $payroll_status, $id]);
+            $payroll_stmt->execute();
+
+            // Update user account
+            $user_role = getUserRoleFromEmployeeType($employee_type);
+            $user_update_stmt = $conn->prepare("UPDATE users SET email=?, first_name=?, last_name=?, gender=?, role=?, phone=?, address=?, employee_id=?, updated_at=NOW() WHERE employee_id=?");
+            bindParameters($user_update_stmt, "sssssssss", [
+                $email, $first_name, $last_name, $gender, $user_role, $phone, $address, $employee_id, $old_employee_id
+            ]);
+            $user_update_stmt->execute();
+
+            $conn->commit();
+            redirectWithMessage('employees.php', 'Employee and user account updated successfully!', 'success');
         }
+    } catch (Exception $e) {
+        $conn->rollback();
+        $error = 'Error processing employee: ' . $e->getMessage();
     }
 }
 
@@ -345,10 +461,7 @@ include 'nav_bar.php';
 </head>
 <body>
     <div class="container">
-      
-        <!-- Main Content Area -->
         <div class="main-content">
-            <!-- Tabs -->
             <div class="tabs">
                 <ul>
                     <li>
@@ -365,20 +478,19 @@ include 'nav_bar.php';
                     <?php endif; ?>
                 </ul>
             </div>
-            <!-- Content -->
             <div class="content">
-                <?php $flash = getFlashMessage(); if ($flash): ?>
-                    <div class="alert alert-<?php echo $flash['type']; ?>">
-                        <?php echo htmlspecialchars($flash['message']); ?>
+                <?php if ($flash = getFlashMessage()): ?>
+                    <div class="alert alert-<?= htmlspecialchars($flash['type'], ENT_QUOTES, 'UTF-8') ?>">
+                        <?= htmlspecialchars($flash['message'], ENT_QUOTES, 'UTF-8') ?>
                     </div>
                 <?php endif; ?>
                 <?php if (isset($error)): ?>
-                    <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
+                    <div class="alert alert-danger"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
                 <?php endif; ?>
                 <?php if (hasPermission('hr_manager')): ?>
                     <div id="employees" class="tab-content active">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                            <h2>Employees (<?php echo count($employees); ?>)</h2>
+                            <h2>Employees (<?= $total ?>)</h2>
                             <button onclick="showAddModal()" class="btn btn-success">Add New Employee</button>
                         </div>
                         <!-- Search and Filters -->
@@ -387,15 +499,26 @@ include 'nav_bar.php';
                                 <div class="filter-row">
                                     <div class="form-group">
                                         <label for="search">Search</label>
-                                        <input type="text" class="form-control" id="search" name="search" value="<?php echo htmlspecialchars($search); ?>" placeholder="Name, ID, or Email">
+                                        <input type="text" class="form-control" id="search" name="search" value="<?= htmlspecialchars($search, ENT_QUOTES, 'UTF-8') ?>" placeholder="Name, ID, or Email">
                                     </div>
                                     <div class="form-group">
                                         <label for="department">Department</label>
                                         <select class="form-control" id="department" name="department">
                                             <option value="">All Departments</option>
                                             <?php foreach ($departments as $dept): ?>
-                                                <option value="<?php echo $dept['id']; ?>" <?php echo $department_filter == $dept['id'] ? 'selected' : ''; ?>>
-                                                    <?php echo htmlspecialchars($dept['name']); ?>
+                                                <option value="<?= (int)$dept['id'] ?>" <?= $department_filter == $dept['id'] ? 'selected' : '' ?>>
+                                                    <?= htmlspecialchars($dept['name'], ENT_QUOTES, 'UTF-8') ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="section">Section</label>
+                                        <select class="form-control" id="section" name="section">
+                                            <option value="">All Sections</option>
+                                            <?php foreach ($sections as $section): ?>
+                                                <option value="<?= (int)$section['id'] ?>" <?= $section_filter == $section['id'] ? 'selected' : '' ?>>
+                                                    <?= htmlspecialchars($section['name'], ENT_QUOTES, 'UTF-8') ?> (<?= htmlspecialchars($section['department_name'], ENT_QUOTES, 'UTF-8') ?>)
                                                 </option>
                                             <?php endforeach; ?>
                                         </select>
@@ -404,24 +527,25 @@ include 'nav_bar.php';
                                         <label for="type">Employee Type</label>
                                         <select class="form-control" id="type" name="type">
                                             <option value="">All Types</option>
-                                            <option value="officer" <?php echo $type_filter === 'officer' ? 'selected' : ''; ?>>Officer</option>
-                                            <option value="section_head" <?php echo $type_filter === 'section_head' ? 'selected' : ''; ?>>Section Head</option>
-                                            <option value="manager" <?php echo $type_filter === 'manager' ? 'selected' : ''; ?>>Manager</option>
-                                            <option value="hr_manager" <?php echo $type_filter === 'hr_manager' ? 'selected' : ''; ?>>Human Resource Manager</option>
-                                            <option value="dept_head" <?php echo $type_filter === 'dept_head' ? 'selected' : ''; ?>>Department Head</option>
-                                            <option value="managing_director" <?php echo $type_filter === 'managing_director' ? 'selected' : ''; ?>>Managing Director</option>
-                                            <option value="bod_chairman" <?php echo $type_filter === 'bod_chairman' ? 'selected' : ''; ?>>BOD Chairman</option>
+                                            <option value="officer" <?= $type_filter === 'officer' ? 'selected' : '' ?>>Officer</option>
+                                            <option value="section_head" <?= $type_filter === 'section_head' ? 'selected' : '' ?>>Section Head</option>
+                                            <option value="sub_section_head" <?= $type_filter === 'sub_section_head' ? 'selected' : '' ?>>Sub Section Head</option>
+                                            <option value="manager" <?= $type_filter === 'manager' ? 'selected' : '' ?>>Manager</option>
+                                            <option value="hr_manager" <?= $type_filter === 'hr_manager' ? 'selected' : '' ?>>Human Resource Manager</option>
+                                            <option value="dept_head" <?= $type_filter === 'dept_head' ? 'selected' : '' ?>>Department Head</option>
+                                            <option value="managing_director" <?= $type_filter === 'managing_director' ? 'selected' : '' ?>>Managing Director</option>
+                                            <option value="bod_chairman" <?= $type_filter === 'bod_chairman' ? 'selected' : '' ?>>BOD Chairman</option>
                                         </select>
                                     </div>
                                     <div class="form-group">
                                         <label for="status">Status</label>
                                         <select class="form-control" id="status" name="status">
                                             <option value="">All Status</option>
-                                            <option value="active" <?php echo $status_filter === 'active' ? 'selected' : ''; ?>>Active</option>
-                                            <option value="inactive" <?php echo $status_filter === 'inactive' ? 'selected' : ''; ?>>Inactive</option>
-                                            <option value="resigned" <?php echo $status_filter === 'resigned' ? 'selected' : ''; ?>>Resigned</option>
-                                            <option value="fired" <?php echo $status_filter === 'fired' ? 'selected' : ''; ?>>Fired</option>
-                                            <option value="retired" <?php echo $status_filter === 'retired' ? 'selected' : ''; ?>>Retired</option>
+                                            <option value="active" <?= $status_filter === 'active' ? 'selected' : '' ?>>Active</option>
+                                            <option value="inactive" <?= $status_filter === 'inactive' ? 'selected' : '' ?>>Inactive</option>
+                                            <option value="resigned" <?= $status_filter === 'resigned' ? 'selected' : '' ?>>Resigned</option>
+                                            <option value="fired" <?= $status_filter === 'fired' ? 'selected' : '' ?>>Fired</option>
+                                            <option value="retired" <?= $status_filter === 'retired' ? 'selected' : '' ?>>Retired</option>
                                         </select>
                                     </div>
                                     <div class="form-group">
@@ -441,6 +565,7 @@ include 'nav_bar.php';
                                         <th>Email</th>
                                         <th>Department</th>
                                         <th>Section</th>
+                                        <th>Sub-Section</th>
                                         <th>Type</th>
                                         <th>Status</th>
                                         <th>Job Group</th>
@@ -449,37 +574,30 @@ include 'nav_bar.php';
                                 </thead>
                                 <tbody>
                                     <?php if (empty($employees)): ?>
-                                        <tr>
-                                            <td colspan="9" class="text-center">No employees found</td>
-                                        </tr>
+                                        <tr><td colspan="10" class="text-center">No employees found</td></tr>
                                     <?php else: ?>
                                         <?php foreach ($employees as $emp): ?>
                                             <tr>
-                                                <td><?php echo htmlspecialchars($emp['employee_id']); ?></td>
-                                                <td><?php echo htmlspecialchars($emp['first_name'] . ' ' . $emp['last_name']); ?></td>
-                                                <td><?php echo htmlspecialchars($emp['email'] ?? 'N/A'); ?></td>
-                                                <td><?php echo htmlspecialchars($emp['department_name'] ?? 'N/A'); ?></td>
-                                                <td><?php echo htmlspecialchars($emp['section_name'] ?? 'N/A'); ?></td>
+                                                <td><?= htmlspecialchars($emp['employee_id'], ENT_QUOTES, 'UTF-8') ?></td>
+                                                <td><?= htmlspecialchars(trim($emp['first_name'] . ' ' . $emp['last_name'] . ' ' . ($emp['surname'] ?? '')), ENT_QUOTES, 'UTF-8') ?></td>
+                                                <td><?= htmlspecialchars($emp['email'] ?? 'N/A', ENT_QUOTES, 'UTF-8') ?></td>
+                                                <td><?= htmlspecialchars($emp['department_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8') ?></td>
+                                                <td><?= htmlspecialchars($emp['section_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8') ?></td>
+                                                <td><?= htmlspecialchars($emp['subsection_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8') ?></td>
                                                 <td>
-                                                    <span class="badge <?php echo getEmployeeTypeBadge($emp['employee_type'] ?? ''); ?>">
-                                                        <?php
-                                                        $type = $emp['employee_type'] ?? '';
-                                                        echo $type ? ucwords(str_replace('_', ' ', $type)) : 'N/A';
-                                                        ?>
+                                                    <span class="badge <?= getEmployeeTypeBadge($emp['employee_type'] ?? '') ?>">
+                                                        <?= $emp['employee_type'] ? htmlspecialchars(ucwords(str_replace('_', ' ', $emp['employee_type'])), ENT_QUOTES, 'UTF-8') : 'N/A' ?>
                                                     </span>
                                                 </td>
                                                 <td>
-                                                    <span class="badge <?php echo getEmployeeStatusBadge($emp['employee_status'] ?? ''); ?>">
-                                                        <?php
-                                                        $status = $emp['employee_status'] ?? '';
-                                                        echo $status ? ucwords($status) : 'N/A';
-                                                        ?>
+                                                    <span class="badge <?= getEmployeeStatusBadge($emp['employee_status'] ?? '') ?>">
+                                                        <?= $emp['employee_status'] ? htmlspecialchars(ucwords($emp['employee_status']), ENT_QUOTES, 'UTF-8') : 'N/A' ?>
                                                     </span>
                                                 </td>
-                                                <td><?php echo htmlspecialchars($emp['job_group'] ?? 'N/A'); ?></td>
+                                                <td><?= htmlspecialchars($emp['scale_id'] ?? 'N/A', ENT_QUOTES, 'UTF-8') ?></td>
                                                 <td>
-                                                    <button onclick="showEditModal(<?php echo htmlspecialchars(json_encode($emp)); ?>)" class="btn btn-sm btn-primary">Edit</button>
-                                                    <a href="personal_profile.php?view_employee=<?php echo $emp['id']; ?>" class="btn btn-sm btn-info">Profile</a>
+                                                    <button onclick="showEditModal(<?= htmlspecialchars(json_encode($emp, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8') ?>)" class="btn btn-sm btn-primary">Edit</button>
+                                                    <a href="personal_profile.php?token=<?= urlencode($emp['profile_token']) ?>" class="btn btn-sm btn-info">Profile</a>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -487,6 +605,20 @@ include 'nav_bar.php';
                                 </tbody>
                             </table>
                         </div>
+                        <!-- Pagination -->
+                        <?php if ($totalPages > 1): ?>
+                        <div class="pagination">
+                            <?php if ($page > 1): ?>
+                                <a href="?page=<?= $page - 1 ?><?= $search ? "&search=" . urlencode($search) : '' ?><?= $department_filter ? "&department=" . $department_filter : '' ?><?= $section_filter ? "&section=" . $section_filter : '' ?><?= $type_filter ? "&type=" . $type_filter : '' ?><?= $status_filter ? "&status=" . $status_filter : '' ?>" class="page-link">Previous</a>
+                            <?php endif; ?>
+                            <?php for ($i = max(1, $page - 2); $i <= min($totalPages, $page + 2); $i++): ?>
+                                <a href="?page=<?= $i ?><?= $search ? "&search=" . urlencode($search) : '' ?><?= $department_filter ? "&department=" . $department_filter : '' ?><?= $section_filter ? "&section=" . $section_filter : '' ?><?= $type_filter ? "&type=" . $type_filter : '' ?><?= $status_filter ? "&status=" . $status_filter : '' ?>" class="page-link <?= $i === $page ? 'active' : '' ?>"><?= $i ?></a>
+                            <?php endfor; ?>
+                            <?php if ($page < $totalPages): ?>
+                                <a href="?page=<?= $page + 1 ?><?= $search ? "&search=" . urlencode($search) : '' ?><?= $department_filter ? "&department=" . $department_filter : '' ?><?= $section_filter ? "&section=" . $section_filter : '' ?><?= $type_filter ? "&type=" . $type_filter : '' ?><?= $status_filter ? "&status=" . $status_filter : '' ?>" class="page-link">Next</a>
+                            <?php endif; ?>
+                        </div>
+                        <?php endif; ?>
                     </div>
                 <?php else: ?>
                     <div class="alert alert-danger">You do not have permission to view this page.</div>
@@ -494,8 +626,10 @@ include 'nav_bar.php';
             </div>
         </div>
     </div>
-    <!-- Add Employee Modal -->
+
+    <!-- Modals -->
     <?php if (hasPermission('hr_manager')): ?>
+    <!-- Add Modal -->
     <div id="addModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -518,6 +652,10 @@ include 'nav_bar.php';
                     <div class="form-group">
                         <label for="last_name">Last Name</label>
                         <input type="text" class="form-control" id="last_name" name="last_name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="surname">Surname</label>
+                        <input type="text" class="form-control" id="surname" name="surname">
                     </div>
                     <div class="form-group">
                         <label for="gender">Gender</label>
@@ -578,6 +716,7 @@ include 'nav_bar.php';
                         <select class="form-control" id="employee_type" name="employee_type" required onchange="handleEmployeeTypeChange()">
                             <option value="">Select Type</option>
                             <option value="officer">Officer</option>
+                            <option value="sub_section_head">Sub Section Head</option>
                             <option value="section_head">Section Head</option>
                             <option value="manager">Manager</option>
                             <option value="hr_manager">Human Resource Manager</option>
@@ -591,30 +730,37 @@ include 'nav_bar.php';
                         <select class="form-control" id="department_id" name="department_id" onchange="updateSections()">
                             <option value="">Select Department</option>
                             <?php foreach ($departments as $dept): ?>
-                                <option value="<?php echo $dept['id']; ?>"><?php echo htmlspecialchars($dept['name']); ?></option>
+                                <option value="<?= (int)$dept['id'] ?>"><?= htmlspecialchars($dept['name'], ENT_QUOTES, 'UTF-8') ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                 </div>
-                <div class="form-group" id="section_group">
-                    <label for="section_id">Section</label>
-                    <select class="form-control" id="section_id" name="section_id">
-                        <option value="">Select Section</option>
-                    </select>
+                <div class="form-row">
+                    <div class="form-group" id="section_group">
+                        <label for="section_id">Section</label>
+                        <select class="form-control" id="section_id" name="section_id" onchange="updateSubSections()">
+                            <option value="">Select Section</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="subsection_group" style="display: none;">
+                        <label for="subsection_id">Sub-Section</label>
+                        <select class="form-control" id="subsection_id" name="subsection_id">
+                            <option value="">Select Sub-Section</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label for="job_group">Job Group</label>
                     <select class="form-control" id="job_group" name="job_group" required>
                         <option value="">Select Job Group</option>
                         <?php foreach ($job_groups as $group): ?>
-                            <option value="<?php echo htmlspecialchars($group); ?>"><?php echo htmlspecialchars($group); ?></option>
+                            <option value="<?= htmlspecialchars($group, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($group, ENT_QUOTES, 'UTF-8') ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Next of Kin</label>
                     <div id="next_of_kin_container">
-                        <!-- Initial empty item -->
                         <div class="next_of_kin_item form-row">
                             <div class="form-group">
                                 <input type="text" name="next_of_kin_name[]" placeholder="Name" class="form-control">
@@ -637,7 +783,8 @@ include 'nav_bar.php';
             </form>
         </div>
     </div>
-    <!-- Edit Employee Modal -->
+
+    <!-- Edit Modal -->
     <div id="editModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -661,6 +808,10 @@ include 'nav_bar.php';
                     <div class="form-group">
                         <label for="edit_last_name">Last Name</label>
                         <input type="text" class="form-control" id="edit_last_name" name="last_name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit_surname">Surname</label>
+                        <input type="text" class="form-control" id="edit_surname" name="surname">
                     </div>
                     <div class="form-group">
                         <label for="edit_gender">Gender</label>
@@ -721,6 +872,7 @@ include 'nav_bar.php';
                         <select class="form-control" id="edit_employee_type" name="employee_type" required onchange="handleEditEmployeeTypeChange()">
                             <option value="">Select Type</option>
                             <option value="officer">Officer</option>
+                            <option value="sub_section_head">Sub Section Head</option>
                             <option value="section_head">Section Head</option>
                             <option value="manager">Manager</option>
                             <option value="hr_manager">Human Resource Manager</option>
@@ -734,16 +886,24 @@ include 'nav_bar.php';
                         <select class="form-control" id="edit_department_id" name="department_id" onchange="updateEditSections()">
                             <option value="">Select Department</option>
                             <?php foreach ($departments as $dept): ?>
-                                <option value="<?php echo $dept['id']; ?>"><?php echo htmlspecialchars($dept['name']); ?></option>
+                                <option value="<?= (int)$dept['id'] ?>"><?= htmlspecialchars($dept['name'], ENT_QUOTES, 'UTF-8') ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                 </div>
-                <div class="form-group" id="edit_section_group">
-                    <label for="edit_section_id">Section</label>
-                    <select class="form-control" id="edit_section_id" name="section_id">
-                        <option value="">Select Section</option>
-                    </select>
+                <div class="form-row">
+                    <div class="form-group" id="edit_section_group">
+                        <label for="edit_section_id">Section</label>
+                        <select class="form-control" id="edit_section_id" name="section_id" onchange="updateEditSubSections()">
+                            <option value="">Select Section</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="edit_subsection_group" style="display: none;">
+                        <label for="edit_subsection_id">Sub-Section</label>
+                        <select class="form-control" id="edit_subsection_id" name="subsection_id">
+                            <option value="">Select Sub-Section</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label for="edit_employee_status">Status</label>
@@ -761,14 +921,14 @@ include 'nav_bar.php';
                     <select class="form-control" id="edit_job_group" name="job_group" required>
                         <option value="">Select Job Group</option>
                         <?php foreach ($job_groups as $group): ?>
-                            <option value="<?php echo htmlspecialchars($group); ?>"><?php echo htmlspecialchars($group); ?></option>
+                            <option value="<?= htmlspecialchars($group, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($group, ENT_QUOTES, 'UTF-8') ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Next of Kin</label>
                     <div id="edit_next_of_kin_container">
-                        <!-- Items will be populated dynamically -->
+                        <!-- Populated by JS -->
                     </div>
                     <button type="button" onclick="addEditNok()" class="btn btn-secondary">Add Next of Kin</button>
                 </div>
@@ -780,31 +940,32 @@ include 'nav_bar.php';
         </div>
     </div>
     <?php endif; ?>
+
     <script>
-        // Sections data for dynamic population
-        const sectionsData = <?php echo json_encode($sections); ?>;
-        
+        const sectionsData = <?= json_encode($sections, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;
+        const subsectionsData = <?= json_encode($subsections, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;
+
         function showAddModal() {
             document.getElementById('addModal').style.display = 'block';
             updateSections();
-            // Ensure at least one empty NOK field
             if (document.querySelectorAll('#next_of_kin_container .next_of_kin_item').length === 0) {
                 addNok();
             }
         }
-        
         function hideAddModal() {
             document.getElementById('addModal').style.display = 'none';
             document.getElementById('addModal').querySelector('form').reset();
             document.getElementById('section_id').innerHTML = '<option value="">Select Section</option>';
+            document.getElementById('subsection_id').innerHTML = '<option value="">Select Sub-Section</option>';
+            document.getElementById('subsection_group').style.display = 'none';
             document.getElementById('next_of_kin_container').innerHTML = '';
         }
-        
         function showEditModal(employee) {
             document.getElementById('edit_id').value = employee.id;
             document.getElementById('edit_employee_id').value = employee.employee_id;
             document.getElementById('edit_first_name').value = employee.first_name;
             document.getElementById('edit_last_name').value = employee.last_name;
+            document.getElementById('edit_surname').value = employee.surname || '';
             document.getElementById('edit_gender').value = employee.gender || '';
             document.getElementById('edit_national_id').value = employee.national_id || '';
             document.getElementById('edit_email').value = employee.email || '';
@@ -817,9 +978,8 @@ include 'nav_bar.php';
             document.getElementById('edit_employee_type').value = employee.employee_type || '';
             document.getElementById('edit_department_id').value = employee.department_id || '';
             document.getElementById('edit_employee_status').value = employee.employee_status || '';
-            document.getElementById('edit_job_group').value = employee.job_group || '';
-            
-            // Populate next of kin
+            document.getElementById('edit_job_group').value = employee.scale_id || '';
+
             const editNokContainer = document.getElementById('edit_next_of_kin_container');
             editNokContainer.innerHTML = '';
             let nokList = [];
@@ -835,23 +995,26 @@ include 'nav_bar.php';
                     addEditNok(nok.name, nok.relationship, nok.contact);
                 });
             }
-
-            updateEditSections(employee.section_id);
+            updateEditSections(employee.section_id, employee.subsection_id);
             handleEditEmployeeTypeChange();
             document.getElementById('editModal').style.display = 'block';
         }
-        
         function hideEditModal() {
             document.getElementById('editModal').style.display = 'none';
             document.getElementById('editModal').querySelector('form').reset();
             document.getElementById('edit_section_id').innerHTML = '<option value="">Select Section</option>';
+            document.getElementById('edit_subsection_id').innerHTML = '<option value="">Select Sub-Section</option>';
+            document.getElementById('edit_subsection_group').style.display = 'none';
             document.getElementById('edit_next_of_kin_container').innerHTML = '';
         }
-        
         function updateSections() {
             const departmentId = document.getElementById('department_id').value;
             const sectionSelect = document.getElementById('section_id');
+            const subsectionGroup = document.getElementById('subsection_group');
+            const subsectionSelect = document.getElementById('subsection_id');
             sectionSelect.innerHTML = '<option value="">Select Section</option>';
+            subsectionSelect.innerHTML = '<option value="">Select Sub-Section</option>';
+            subsectionGroup.style.display = 'none';
             if (departmentId) {
                 const filteredSections = sectionsData.filter(section => section.department_id == departmentId);
                 filteredSections.forEach(section => {
@@ -862,11 +1025,36 @@ include 'nav_bar.php';
                 });
             }
         }
-        
-        function updateEditSections(selectedSectionId = '') {
+        function updateSubSections() {
+            const sectionId = document.getElementById('section_id').value;
+            const subsectionGroup = document.getElementById('subsection_group');
+            const subsectionSelect = document.getElementById('subsection_id');
+            subsectionSelect.innerHTML = '<option value="">Select Sub-Section</option>';
+            if (sectionId) {
+                const filteredSubsections = subsectionsData.filter(subsection => subsection.section_id == sectionId);
+                if (filteredSubsections.length > 0) {
+                    subsectionGroup.style.display = 'block';
+                    filteredSubsections.forEach(subsection => {
+                        const option = document.createElement('option');
+                        option.value = subsection.id;
+                        option.textContent = subsection.name;
+                        subsectionSelect.appendChild(option);
+                    });
+                } else {
+                    subsectionGroup.style.display = 'none';
+                }
+            } else {
+                subsectionGroup.style.display = 'none';
+            }
+        }
+        function updateEditSections(selectedSectionId = '', selectedSubsectionId = '') {
             const departmentId = document.getElementById('edit_department_id').value;
             const sectionSelect = document.getElementById('edit_section_id');
+            const subsectionGroup = document.getElementById('edit_subsection_group');
+            const subsectionSelect = document.getElementById('edit_subsection_id');
             sectionSelect.innerHTML = '<option value="">Select Section</option>';
+            subsectionSelect.innerHTML = '<option value="">Select Sub-Section</option>';
+            subsectionGroup.style.display = 'none';
             if (departmentId) {
                 const filteredSections = sectionsData.filter(section => section.department_id == departmentId);
                 filteredSections.forEach(section => {
@@ -878,41 +1066,74 @@ include 'nav_bar.php';
                     }
                     sectionSelect.appendChild(option);
                 });
+                if (selectedSectionId) {
+                    updateEditSubSections(selectedSubsectionId);
+                }
             }
         }
-        
+        function updateEditSubSections(selectedSubsectionId = '') {
+            const sectionId = document.getElementById('edit_section_id').value;
+            const subsectionGroup = document.getElementById('edit_subsection_group');
+            const subsectionSelect = document.getElementById('edit_subsection_id');
+            subsectionSelect.innerHTML = '<option value="">Select Sub-Section</option>';
+            if (sectionId) {
+                const filteredSubsections = subsectionsData.filter(subsection => subsection.section_id == sectionId);
+                if (filteredSubsections.length > 0) {
+                    subsectionGroup.style.display = 'block';
+                    filteredSubsections.forEach(subsection => {
+                        const option = document.createElement('option');
+                        option.value = subsection.id;
+                        option.textContent = subsection.name;
+                        if (subsection.id == selectedSubsectionId) {
+                            option.selected = true;
+                        }
+                        subsectionSelect.appendChild(option);
+                    });
+                } else {
+                    subsectionGroup.style.display = 'none';
+                }
+            } else {
+                subsectionGroup.style.display = 'none';
+            }
+        }
         function handleEmployeeTypeChange() {
             const employeeType = document.getElementById('employee_type').value;
             const departmentGroup = document.getElementById('department_group');
             const sectionGroup = document.getElementById('section_group');
-            if (employeeType === 'managing_director' || employeeType === 'bod_chairman') {
+            const subsectionGroup = document.getElementById('subsection_group');
+            if (['managing_director', 'bod_chairman'].includes(employeeType)) {
                 departmentGroup.style.display = 'none';
                 sectionGroup.style.display = 'none';
+                subsectionGroup.style.display = 'none';
                 document.getElementById('department_id').value = '';
                 document.getElementById('section_id').value = '';
+                document.getElementById('subsection_id').value = '';
             } else {
                 departmentGroup.style.display = 'block';
                 sectionGroup.style.display = 'block';
             }
         }
-        
         function handleEditEmployeeTypeChange() {
             const employeeType = document.getElementById('edit_employee_type').value;
             const departmentGroup = document.getElementById('edit_department_group');
             const sectionGroup = document.getElementById('edit_section_group');
-            if (employeeType === 'managing_director' || employeeType === 'bod_chairman') {
+            const subsectionGroup = document.getElementById('edit_subsection_group');
+            if (['managing_director', 'bod_chairman'].includes(employeeType)) {
                 departmentGroup.style.display = 'none';
                 sectionGroup.style.display = 'none';
+                subsectionGroup.style.display = 'none';
                 document.getElementById('edit_department_id').value = '';
                 document.getElementById('edit_section_id').value = '';
+                document.getElementById('edit_subsection_id').value = '';
             } else {
                 departmentGroup.style.display = 'block';
                 sectionGroup.style.display = 'block';
-                updateEditSections(document.getElementById('edit_section_id').value);
+                const sectionId = document.getElementById('edit_section_id').value;
+                if (sectionId) {
+                    updateEditSubSections(document.getElementById('edit_subsection_id').value);
+                }
             }
         }
-
-        // Functions for adding/removing next of kin in add modal
         function addNok(name = '', relationship = '', contact = '') {
             const container = document.getElementById('next_of_kin_container');
             const item = document.createElement('div');
@@ -931,12 +1152,9 @@ include 'nav_bar.php';
             `;
             container.appendChild(item);
         }
-
         function removeNok(btn) {
             btn.parentElement.remove();
         }
-
-        // Functions for adding/removing next of kin in edit modal
         function addEditNok(name = '', relationship = '', contact = '') {
             const container = document.getElementById('edit_next_of_kin_container');
             const item = document.createElement('div');
@@ -955,22 +1173,18 @@ include 'nav_bar.php';
             `;
             container.appendChild(item);
         }
-
         function removeEditNok(btn) {
             btn.parentElement.remove();
         }
-        
         window.onclick = function(event) {
             const addModal = document.getElementById('addModal');
             const editModal = document.getElementById('editModal');
-            if (event.target == addModal) {
+            if (event.target === addModal) {
                 hideAddModal();
-            } else if (event.target == editModal) {
+            } else if (event.target === editModal) {
                 hideEditModal();
             }
-        }
-
-        // Initialize with one empty NOK in add modal
+        };
         addNok();
     </script>
 </body>

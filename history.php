@@ -14,6 +14,14 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'header.php';
 require_once 'config.php';
 $conn = getConnection();
@@ -27,25 +35,6 @@ $user = [
 ];
 
 
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' =>4 ,
-        'managing_director'=>3,
-        'dept_head' => 2,
-        'section head'=>1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
 
 // Check if user has permission to access this page
 if (!hasPermission('hr_manager')) {
@@ -108,18 +97,16 @@ include 'nav_bar.php';
         <!-- Main Content Area -->
         <div class="main-content">
             <div class="leave-tabs">
-                    <a href="leave_management.php" class="leave-tab">Apply Leave</a>
-                    <?php if (in_array($user['role'], ['hr_manager', 'dept_head', 'section_head', 'manager', 'managing_director','super_admin'])): ?>
+                <a href="leave_management.php" class="leave-tab">Apply Leave</a>
+                <?php if (in_array($user['role'], ['hr_manager', 'dept_head', 'section_head', 'manager', 'managing_director','super_admin'])): ?>
                     <a href="manage.php" class="leave-tab">Manage Leave</a>
-                    <?php endif; ?>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director'])): ?>
-                    <a href="history.php" class="leave-tab">Leave History</a>
-                    <?php endif; ?>
-                    <?php if(!hasPermission('hr_manager'))  :?>
-                        <a href="holidays.php" class="leave-tab">Holidays</a>
-                        <?php endif; ?>
-                    <a href="profile.php" class="leave-tab active">My Leave Profile</a>
-                </div>
+                <?php endif; ?>
+                <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director'])): ?>
+                    <a href="history.php" class="leave-tab active">Leave History</a>
+                    <a href="holidays.php" class="leave-tab">Holidays</a>
+                <?php endif; ?>
+                <a href="profile.php" class="leave-tab ">My Leave Profile</a>
+            </div>
                 <!-- Leave History Tab Content -->
                 <div class="tab-content">
                     <h3>Leave History</h3>

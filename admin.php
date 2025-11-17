@@ -6,8 +6,19 @@ error_reporting(E_ALL);
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'config.php';
-require_once 'header.php';
+require_once 'notification/services/NotificationService.php';
+
+// Initialize notification service
+$notificationService = new NotificationService($pdo);
 
 // CSRF Token Generation
 function generateCsrfToken(): string {
@@ -31,22 +42,6 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-
-function hasPermission(string $requiredRole): bool {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    $roles = [
-        'managing_director' => 6,
-        'super_admin' => 5,
-        'hr_manager' => 4,
-        'dept_head' => 3,
-        'section_head' => 2,
-        'manager' => 1,
-        'employee' => 0
-    ];
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    return $userLevel >= $requiredLevel;
-}
 
 // Restrict access
 if (!(hasPermission('super_admin') || hasPermission('hr_manager'))) {
@@ -155,31 +150,34 @@ function calculateFinancialYearByDate(string $current_date): array {
     ];
 }
 
-function getNextFinancialYear(?string $current_date = null, ?mysqli $mysqli = null): array {
-    $current_fy = getCurrentFinancialYear($current_date, $mysqli);
-    $current_end_year = (int)explode('-', $current_fy['end_date'])[0];
-    $next_start_year = $current_end_year;
-    $next_end_year = $next_start_year + 1;
-    return [
+function canCreateNewFinancialYear(mysqli $mysqli): array {
+    $current_date = date('Y-m-d');
+    $current_month = date('n'); // Current month (1-12)
+    $current_year = date('Y');
+    
+    // Calculate what the next financial year should be
+    if ($current_month >= 7) { // July-December
+        $next_start_year = $current_year;
+        $next_end_year = $current_year + 1;
+    } else { // January-June
+        $next_start_year = $current_year;
+        $next_end_year = $current_year + 1;
+    }
+    
+    $next_fy = [
         'start_date' => $next_start_year . '-07-01',
         'end_date' => $next_end_year . '-06-30',
         'year_name' => $next_start_year . '/' . substr($next_end_year, 2)
     ];
-}
-
-function canCreateNewFinancialYear(mysqli $mysqli): array {
-    $current_date = date('Y-m-d');
-    $current_fy = getCurrentFinancialYear($current_date, $mysqli);
-    $next_fy = getNextFinancialYear($current_date, $mysqli);
     
-    $stmt = $mysqli->prepare("SELECT id FROM financial_years WHERE year_name = ?");
+    // Check if next FY already exists in database
+    $stmt = $mysqli->prepare("SELECT id, year_name FROM financial_years WHERE year_name = ?");
     if (!$stmt) {
-        error_log("Prepare failed: " . $mysqli->error);
         return [
             'can_create' => false,
             'reason' => 'Database error: ' . $mysqli->error,
             'next_fy' => null,
-            'current_fy' => $current_fy
+            'current_fy' => null
         ];
     }
     
@@ -190,43 +188,112 @@ function canCreateNewFinancialYear(mysqli $mysqli): array {
     if ($result->fetch_assoc()) {
         return [
             'can_create' => false,
-            'reason' => 'Financial year ' . $next_fy['year_name'] . ' already exists.',
+            'reason' => 'Financial year ' . $next_fy['year_name'] . ' already exists in the database.',
             'next_fy' => null,
-            'current_fy' => $current_fy
+            'current_fy' => null
         ];
     }
     
-    $current_fy_end = strtotime($current_fy['end_date']);
-    $current_timestamp = strtotime($current_date);
-    $days_from_fy_end = ($current_timestamp - $current_fy_end) / (60 * 60 * 24);
-    
-    if ($days_from_fy_end < -30) {
+    // Check if it's July (month 7)
+    if ($current_month == 7) {
+        return [
+            'can_create' => true,
+            'reason' => 'It is currently July. You can create the new financial year.',
+            'next_fy' => $next_fy,
+            'current_fy' => null
+        ];
+    } else {
+        $month_name = date('F');
         return [
             'can_create' => false,
-            'reason' => 'Too early to create next financial year. You can create it 30 days before the current financial year ends (' . date('M d, Y', $current_fy_end) . ').',
+            'reason' => 'Cannot create financial year now. Financial years can only be created in July. Current month is ' . $month_name . '.',
             'next_fy' => null,
-            'current_fy' => $current_fy,
-            'days_until_creation' => abs($days_from_fy_end + 30)
+            'current_fy' => null
         ];
     }
-    
-    if ($days_from_fy_end > 90) {
-        return [
-            'can_create' => false,
-            'reason' => 'Too late to create financial year ' . $next_fy['year_name'] . '. Please contact system administrator.',
-            'next_fy' => null,
-            'current_fy' => $current_fy
-        ];
-    }
-    
-    return [
-        'can_create' => true,
-        'reason' => 'Ready to create next financial year.',
-        'next_fy' => $next_fy,
-        'current_fy' => $current_fy,
-        'creation_window' => $days_from_fy_end <= 0 ? 'Pre-creation window' : 'Post-deadline creation'
-    ];
 }
+
+// Function to check and send financial year reminders
+function checkFinancialYearReminders($notificationService, $mysqli) {
+    $current_month = date('n');
+    $current_day = date('j');
+    $current_date = date('Y-m-d');
+    
+    // Calculate next financial year
+    $current_year = date('Y');
+    if ($current_month >= 7) {
+        $next_start_year = $current_year;
+        $next_end_year = $current_year + 1;
+    } else {
+        $next_start_year = $current_year;
+        $next_end_year = $current_year + 1;
+    }
+    
+    $next_fy = [
+        'start_date' => $next_start_year . '-07-01',
+        'end_date' => $next_end_year . '-06-30',
+        'year_name' => $next_start_year . '/' . substr($next_end_year, 2)
+    ];
+    
+    // Check if next FY already exists
+    $stmt = $mysqli->prepare("SELECT id FROM financial_years WHERE year_name = ?");
+    $stmt->bind_param("s", $next_fy['year_name']);
+    $stmt->execute();
+    $existing_fy = $stmt->get_result()->fetch_assoc();
+    
+    if ($existing_fy) {
+        return; // FY already exists, no need for reminders
+    }
+    
+    $month_names = [
+        1 => 'January', 2 => 'February', 3 => 'March', 4 => 'April', 
+        5 => 'May', 6 => 'June', 7 => 'July', 8 => 'August',
+        9 => 'September', 10 => 'October', 11 => 'November', 12 => 'December'
+    ];
+    
+    $current_month_name = $month_names[$current_month];
+    
+    // Send appropriate notification based on date
+    if ($current_month == 7 && $current_day == 1) {
+        // URGENT: July 1st - Critical notification
+        $notificationService->triggerNotification('financial_year_urgent', [
+            'next_fy_name' => $next_fy['year_name'],
+            'next_fy_start' => $next_fy['start_date'],
+            'next_fy_end' => $next_fy['end_date'],
+            'current_month' => $current_month_name,
+            'current_date' => $current_date
+        ]);
+        
+        error_log("URGENT Financial Year notification sent for July 1st");
+        
+    } elseif ($current_month == 7) {
+        // High priority: It's July but not the 1st
+        $notificationService->triggerNotification('financial_year_reminder', [
+            'next_fy_name' => $next_fy['year_name'],
+            'next_fy_start' => $next_fy['start_date'],
+            'next_fy_end' => $next_fy['end_date'],
+            'current_month' => $current_month_name,
+            'current_date' => $current_date
+        ]);
+        
+        error_log("Financial Year reminder sent for July");
+        
+    } elseif ($current_month == 6) {
+        // Medium priority: June - prepare for next FY
+        $notificationService->triggerNotification('financial_year_reminder', [
+            'next_fy_name' => $next_fy['year_name'],
+            'next_fy_start' => $next_fy['start_date'],
+            'next_fy_end' => $next_fy['end_date'],
+            'current_month' => $current_month_name,
+            'current_date' => $current_date
+        ]);
+        
+        error_log("Financial Year preparation reminder sent for June");
+    }
+}
+
+// Call this function to check for reminders
+checkFinancialYearReminders($notificationService, $mysqli);
 
 function allocateLeaveToAllEmployees(mysqli $mysqli, int $financial_year_id): int {
     $debug_info = [];
@@ -595,7 +662,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $fy_status = canCreateNewFinancialYear($mysqli);
                 if (!$fy_status['can_create']) {
-                    $error = $fy_status['reason'] . (isset($fy_status['days_until_creation']) ? ' (Available in ' . ceil($fy_status['days_until_creation']) . ' days)' : '');
+                    $error = $fy_status['reason'];
                 } else {
                     $next_fy = $fy_status['next_fy'];
                     $start_date = $next_fy['start_date'];
@@ -604,6 +671,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $total_days = calculateTotalDays($start_date, $end_date);
                     
                     try {
+                        $mysqli->begin_transaction();
+                        
                         $stmt = $mysqli->prepare("INSERT INTO financial_years (start_date, end_date, year_name, total_days, is_active, created_at) VALUES (?, ?, ?, ?, 1, NOW())");
                         if (!$stmt) {
                             throw new Exception('Failed to prepare financial year insert: ' . $mysqli->error);
@@ -612,6 +681,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         if ($stmt->execute()) {
                             $financial_year_id = $mysqli->insert_id;
                             $allocated_count = allocateLeaveToAllEmployees($mysqli, $financial_year_id);
+                            
+                            // Send success notification to HR and Super Admins
+                            $notificationService->triggerNotification('financial_year_created', [
+                                'fy_name' => $year_name,
+                                'fy_start' => $start_date,
+                                'fy_end' => $end_date,
+                                'allocated_count' => $allocated_count,
+                                'total_days' => $total_days,
+                                'created_by' => $user['first_name'] . ' ' . $user['last_name'],
+                                'created_at' => date('Y-m-d H:i:s')
+                            ]);
+                            
+                            $mysqli->commit();
+                            
                             redirectWithMessage('admin.php?tab=financial', 
                                 "Financial year '{$year_name}' created successfully! Leave allocated to {$allocated_count} employee-leave type combinations.", 
                                 'success');
@@ -619,6 +702,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             throw new Exception('Failed to create financial year: ' . $mysqli->error);
                         }
                     } catch (Exception $e) {
+                        $mysqli->rollback();
                         $error = 'Error creating financial year: ' . $e->getMessage();
                         error_log("Financial year creation error: " . $e->getMessage());
                     }
@@ -797,6 +881,7 @@ function getRoleBadge(string $role): string {
         default: return 'badge-light';
     }
 }
+require_once 'header.php';
 include 'nav_bar.php';
 ?>
 
@@ -827,12 +912,26 @@ include 'nav_bar.php';
                 <?php if (isset($success)): ?>
                     <div class="alert alert-success"><?php echo htmlspecialchars($success); ?></div>
                 <?php endif; ?>
-                
+
                 <div class="leave-tabs">
-                    <?php if (in_array($user['role'], ['super_admin'])): ?>
-                    <a href="admin.php?tab=users" class="leave-tab <?php echo $tab === 'users' ? 'active' : ''; ?>">Users</a>
+                    <?php if (hasPermission('super_admin')): ?>
+                        <a href="admin.php?tab=users" class="leave-tab <?= ($tab === 'users') ? 'active' : '' ?>">
+                            <i class="fas fa-users"></i> Users
+                        </a>
                     <?php endif; ?>
-                    <a href="admin.php?tab=financial" class="leave-tab <?php echo $tab === 'financial' ? 'active' : ''; ?>">Financial Year</a>
+
+                    <a href="admin.php?tab=financial" class="leave-tab <?= ($tab === 'financial') ? 'active' : '' ?>">
+                        <i class="fas fa-calendar-alt"></i> Financial Year
+                    </a>
+
+                    <!-- Add the new consent management tab -->
+                    <a href="consent_management.php" class="leave-tab <?= ($current_page === 'admin' && isset($tab) && $tab === 'consents') ? 'active' : '' ?>">
+                        <i class="fas fa-file-signature"></i> Employee Consents
+                    </a>
+
+                    <a href="audit_dashboard.php" class="leave-tab <?= ($current_page === 'audit') ? 'active' : '' ?>">
+                        <i class="fas fa-shield-alt"></i> Audit
+                    </a>
                 </div>
 
                 <?php if ($tab === 'users'): ?>
@@ -890,17 +989,106 @@ include 'nav_bar.php';
                 <?php elseif ($tab === 'financial'): ?>
                 <div class="tab-content">
                     <h3>Financial Year Management</h3>
-                    <p>Current Financial Year: 
-                        <?php 
-                        $current_fy = getCurrentFinancialYear(null, $mysqli);
-                        echo htmlspecialchars($current_fy['year_name']) . " (" . formatDate($current_fy['start_date']) . " - " . formatDate($current_fy['end_date']) . ")";
-                        ?></p>
                     
+                    <!-- Financial Year Status Card -->
+                    <div class="glass-card">
+                        <h4>Financial Year Status</h4>
+                        
+                        <?php
+                        $current_month = date('n');
+                        $current_day = date('j');
+                        $month_name = date('F');
+                        $current_date = date('Y-m-d');
+                        
+                        // Calculate next financial year
+                        $current_year = date('Y');
+                        if ($current_month >= 7) {
+                            $next_start_year = $current_year;
+                            $next_end_year = $current_year + 1;
+                        } else {
+                            $next_start_year = $current_year;
+                            $next_end_year = $current_year + 1;
+                        }
+                        
+                        $next_fy = [
+                            'start_date' => $next_start_year . '-07-01',
+                            'end_date' => $next_end_year . '-06-30',
+                            'year_name' => $next_start_year . '/' . substr($next_end_year, 2)
+                        ];
+                        
+                        // Check if next FY exists
+                        $stmt = $mysqli->prepare("SELECT id FROM financial_years WHERE year_name = ?");
+                        $stmt->bind_param("s", $next_fy['year_name']);
+                        $stmt->execute();
+                        $existing_fy = $stmt->get_result()->fetch_assoc();
+                        ?>
+
+                        <!-- Notification Status Alert -->
+                        <div class="alert 
+                            <?php 
+                            if ($current_month == 7 && $current_day == 1 && !$existing_fy) {
+                                echo 'alert-danger'; // Critical - July 1st
+                            } elseif ($current_month == 7 && !$existing_fy) {
+                                echo 'alert-warning'; // High priority - July
+                            } elseif ($current_month == 6 && !$existing_fy) {
+                                echo 'alert-info'; // Medium priority - June
+                            } else {
+                                echo 'alert-success'; // All good
+                            }
+                            ?>">
+                            
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <strong>Current Status:</strong> 
+                                    <?php
+                                    if ($existing_fy) {
+                                        echo "✓ Financial Year {$next_fy['year_name']} is already created.";
+                                    } elseif ($current_month == 7 && $current_day == 1) {
+                                        echo "🚨 URGENT: It's July 1st! Create financial year {$next_fy['year_name']} immediately!";
+                                    } elseif ($current_month == 7) {
+                                        echo "⚠️ Important: It's {$month_name}. Please create financial year {$next_fy['year_name']}.";
+                                    } elseif ($current_month == 6) {
+                                        echo "ℹ️ Reminder: It's {$month_name}. Prepare to create financial year {$next_fy['year_name']} next month.";
+                                    } else {
+                                        echo "✓ No action required. Financial years are created in July.";
+                                    }
+                                    ?>
+                                </div>
+                                <?php if (!$existing_fy && $current_month == 7): ?>
+                                    <div class="notification-badge">
+                                        <i class="fas fa-bell"></i> Notification Sent
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+
+                        <!-- Current Month Info -->
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Current Month</label>
+                                <input type="text" class="form-control" value="<?php echo $month_name; ?>" readonly>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Current Date</label>
+                                <input type="text" class="form-control" value="<?php echo $current_date; ?>" readonly>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Next Financial Year</label>
+                                <input type="text" class="form-control" 
+                                       value="<?php echo $next_fy['year_name'] . ' (' . $next_fy['start_date'] . ' to ' . $next_fy['end_date'] . ')'; ?>" 
+                                       readonly>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Add New Financial Year Card -->
                     <div class="glass-card">
                         <h4>Add New Financial Year</h4>
                         
                         <?php if (!$fy_status['can_create']): ?>
-                            <div class="alert alert-info">
+                            <div class="alert alert-warning">
                                 <strong>Note:</strong> <?php echo $fy_status['reason']; ?>
                             </div>
                         <?php endif; ?>
@@ -952,9 +1140,22 @@ include 'nav_bar.php';
 
                             <div class="form-actions">
                                 <button type="submit" class="btn btn-primary" <?php echo !$fy_status['can_create'] ? 'disabled' : ''; ?>>
-                                    <?php echo $fy_status['can_create'] ? 'Add New Financial Year' : 'Cannot Add Financial Year'; ?>
+                                    <?php if ($fy_status['can_create']): ?>
+                                        <i class="fas fa-calendar-plus"></i> Create Financial Year <?php echo $fy_status['next_fy']['year_name']; ?>
+                                    <?php else: ?>
+                                        Cannot Create Financial Year
+                                    <?php endif; ?>
                                 </button>
-                                <button type="button" class="btn btn-secondary" onclick="location.reload()">Refresh Status</button>
+                                <button type="button" class="btn btn-secondary" onclick="location.reload()">
+                                    <i class="fas fa-sync-alt"></i> Refresh Status
+                                </button>
+                                
+                                <!-- Manual Notification Test Button (Remove in production) -->
+                                <?php if (hasPermission('super_admin')): ?>
+                                <button type="button" class="btn btn-info" onclick="testFinancialYearNotification()">
+                                    <i class="fas fa-bell"></i> Test Notification
+                                </button>
+                                <?php endif; ?>
                             </div>
                         </form>
                     </div>
@@ -984,7 +1185,7 @@ include 'nav_bar.php';
                                     <select name="financial_year_id" id="financial_year_id" class="form-control" required>
                                         <option value="">Select financial year</option>
                                         <?php foreach ($financial_years as $fy): ?>
-                                            <option value="<?php echo $fy['id']; ?>" <?php echo $fy['id'] == $current_fy['id'] ? 'selected' : ''; ?>>
+                                            <option value="<?php echo $fy['id']; ?>">
                                                 <?php echo htmlspecialchars($fy['year_name']); ?>
                                             </option>
                                         <?php endforeach; ?>
@@ -1196,6 +1397,42 @@ include 'nav_bar.php';
             checkboxes.forEach(checkbox => {
                 checkbox.checked = selectAll.checked;
             });
+        }
+        
+        function testFinancialYearNotification() {
+            if (confirm('This will send a test financial year notification to all HR managers and super admins. Continue?')) {
+                fetch('test_financial_year_notification.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'test=true&csrf_token=<?php echo generateCsrfToken(); ?>'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Test notification sent successfully!');
+                        // Reload to see the notification
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    } else {
+                        alert('Error sending test notification: ' + data.error);
+                    }
+                })
+                .catch(error => {
+                    alert('Error sending test notification: ' + error);
+                });
+            }
+        }
+        
+        // Auto-check for financial year status every 5 minutes on this page
+        if (window.location.href.includes('tab=financial')) {
+            setInterval(() => {
+                // Simple page reload to check for new notifications
+                console.log('Auto-refreshing financial year status...');
+                window.location.reload();
+            }, 300000); // 5 minutes
         }
         
         window.onclick = function(event) {

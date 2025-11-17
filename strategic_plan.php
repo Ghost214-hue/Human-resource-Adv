@@ -13,8 +13,15 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 
 require_once 'config.php';
+require_once 'auth.php';
 $conn = getConnection();
 
 // Get current user from session
@@ -25,25 +32,6 @@ $user = [
     'id' => $_SESSION['user_id']
 ];
 
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' =>4 ,
-        'managing_director'=>3,
-        'dept_head' => 2,
-        'section head'=>1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
 
 function formatDate($date) {
     if (!$date) return 'N/A';
@@ -481,465 +469,15 @@ if (isset($_SESSION['flash_message'])) {
 include 'header.php';
 include 'nav_bar.php';
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Strategic Plan - HR Management System</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css">
-    <style>
-        /* Styles remain unchanged */
-        .card {
-            background: var(--bg-glass);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-            box-shadow: var(--shadow-md);
-            transition: var(--transition);
-        }
-        
-        .card:hover {
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-lg);
-            border-color: var(--border-accent);
-        }
-        
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid var(--border-color);
-        }
-        
-        .card-title {
-            margin: 0;
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--text-primary);
-        }
-        
-        .empty-state {
-            text-align: center;
-            padding: 3rem 2rem;
-            color: var(--text-muted);
-        }
-        
-        .empty-state i {
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            opacity: 0.5;
-        }
-        
-        .empty-state h3 {
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-            color: var(--text-secondary);
-        }
-        
-        .empty-state p {
-            margin-bottom: 1.5rem;
-            color: var(--text-muted);
-        }
-        
-        .tabs {
-            display: flex;
-            background: var(--bg-glass);
-            border-radius: 12px;
-            padding: 0.5rem;
-            margin-bottom: 2rem;
-            border: 1px solid var(--border-color);
-            backdrop-filter: blur(20px);
-            overflow-x: auto;
-            gap: 0.5rem;
-        }
-        
-        .tabs ul {
-            display: flex;
-            list-style: none;
-            margin: 0;
-            padding: 0;
-            width: 100%;
-        }
-        
-        .tab-link {
-            flex: 1;
-            min-width: 150px;
-            padding: 0.75rem 1.5rem;
-            color: var(--text-secondary);
-            font-weight: 500;
-            font-size: 0.875rem;
-            border-radius: 8px;
-            transition: var(--transition);
-            text-align: center;
-            white-space: nowrap;
-            position: relative;
-            background: transparent;
-            border: 1px solid transparent;
-            cursor: pointer;
-            text-decoration: none;
-        }
-        
-        .tab-link:hover {
-            color: var(--text-primary);
-            background: rgba(255, 255, 255, 0.05);
-            border-color: var(--border-color);
-        }
-        
-        .tab-link.active {
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            color: white;
-            box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
-            border-color: var(--primary-color);
-        }
-        
-        .tab-link.active::before {
-            content: '';
-            position: absolute;
-            top: -2px;
-            left: -2px;
-            right: -2px;
-            bottom: -2px;
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            border-radius: 10px;
-            z-index: -1;
-            opacity: 0.3;
-            filter: blur(4px);
-        }
-        
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
-        }
-        
-        .modal-content {
-            background: var(--bg-card);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 0;
-            width: 90%;
-            max-width: 600px;
-            max-height: 90vh;
-            overflow: hidden;
-            box-shadow: var(--shadow-lg);
-            animation: slideUp 0.3s ease-out;
-        }
-        
-        .modal-header {
-            padding: 1.5rem 2rem;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: var(--bg-glass);
-        }
-        
-        .modal-header h3 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            margin: 0;
-        }
-        
-        .modal form {
-            padding: 2rem;
-            max-height: calc(90vh - 120px);
-            overflow-y: auto;
-        }
-        
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-        }
-        
-        .strategic-plans-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 1.5rem;
-        }
-        
-        .strategic-plan-card {
-            background: var(--bg-card);
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: var(--shadow-md);
-            transition: var(--transition);
-            border: 1px solid var(--border-color);
-        }
-        
-        .strategic-plan-card:hover {
-            transform: translateY(-5px);
-            box-shadow: var(--shadow-lg);
-            border-color: var(--border-accent);
-        }
-        
-        .plan-image {
-            height: 180px;
-            overflow: hidden;
-            position: relative;
-        }
-        
-        .plan-image img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            transition: transform 0.3s ease;
-        }
-        
-        .strategic-plan-card:hover .plan-image img {
-            transform: scale(1.05);
-        }
-        
-        .plan-image-placeholder {
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            color: white;
-            font-size: 3rem;
-            opacity: 0.7;
-        }
-        
-        .plan-details {
-            padding: 1.5rem;
-        }
-        
-        .plan-details h4 {
-            margin: 0 0 0.5rem 0;
-            font-size: 1.2rem;
-            color: var(--text-primary);
-        }
-        
-        .plan-dates {
-            color: var(--text-muted);
-            margin: 0 0 1rem 0;
-            font-size: 0.9rem;
-        }
-        
-        .plan-progress {
-            margin-top: 1rem;
-        }
-        
-        .progress-bar {
-            height: 8px;
-            background-color: var(--border-color);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-bottom: 0.5rem;
-        }
-        
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            border-radius: 4px;
-            transition: width 0.5s ease;
-        }
-        
-        .progress-text {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-        }
-        
-        .plan-actions {
-            padding: 0 1.5rem 1.5rem;
-            display: flex;
-            gap: 0.5rem;
-        }
-        
-        .plan-actions .btn {
-            flex: 1;
-        }
-        
-        .preview-image {
-            max-width: 100%;
-            height: auto;
-            margin-top: 0.5rem;
-            border-radius: 8px;
-            border: 1px solid var(--border-color);
-        }
-        
-        .goals-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-            padding: 1rem;
-            background: var(--bg-glass);
-            border-radius: 12px;
-            border: 1px solid var(--border-color);
-        }
-        
-        .goals-title {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            margin: 0;
-        }
-        
-        .plan-selector {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-        
-        .plan-selector label {
-            font-weight: 500;
-            color: var(--text-secondary);
-        }
-        
-        .plan-selector select {
-            background: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 0.5rem 1rem;
-            color: var(--text-primary);
-            min-width: 200px;
-        }
-        
-        .strategic-plan-image-container {
-            width: 100%;
-            height: 70vh;
-            overflow: hidden;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: var(--bg-glass);
-            border-radius: 12px;
-            border: 1px solid var(--border-color);
-            margin-bottom: 2rem;
-        }
-        
-        .strategic-plan-image-container img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            padding: 10px;
-        }
-        
-        .no-image-placeholder {
-            text-align: center;
-            color: var(--text-muted);
-        }
-        
-        .no-image-placeholder i {
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            opacity: 0.5;
-        }
-        
-        .no-image-placeholder h3 {
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-            color: var(--text-primary);
-        }
-        
-        .table-responsive {
-            overflow-x: auto;
-        }
-        
-        #strategies-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        #strategies-table th {
-            background-color: var(--bg-glass);
-            padding: 12px;
-            text-align: left;
-            font-weight: 600;
-            color: var(--text-primary);
-            border-bottom: 2px solid var(--border-color);
-        }
-        
-        #strategies-table td {
-            padding: 12px;
-            border-bottom: 1px solid var(--border-color);
-            color: var(--text-secondary);
-        }
-        
-        #strategies-table tr:hover {
-            background-color: rgba(255, 255, 255, 0.05);
-        }
-        
-        .text-center {
-            text-align: center;
-        }
-        
-        .mt-4 {
-            margin-top: 1.5rem;
-        }
-        
-        .year-input {
-            width: 60px;
-            text-align: center;
-        }
-        
-        .edit-btn {
-            padding: 0.25rem 0.5rem;
-            font-size: 0.875rem;
-        }
-        
-        @media (max-width: 768px) {
-            .form-row {
-                grid-template-columns: 1fr;
-            }
-            
-            .card-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 1rem;
-            }
-            
-            .tab-link {
-                min-width: 120px;
-            }
-            
-            .strategic-plans-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .goals-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 1rem;
-            }
-            
-            .plan-selector {
-                width: 100%;
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .plan-selector select {
-                width: 100%;
-            }
-            
-            .strategic-plan-image-container {
-                height: 40vh;
-            }
-        }
-    </style>
-</head><body>
+<body>
     <div class="container">
-        
         <!-- Main Content Area -->
         <div class="main-content">
             <div class="content">
                 <div class="leave-tabs">
-                    <a href="strategic_plan.php?tab=goals" class="leave-tab">Strategic Plan</a>
+                    <a href="strategic_plan.php?tab=goals" class="leave-tab active">Strategic Plan</a>
                     <a href="employee_appraisal.php" class="leave-tab">Employee Appraisal</a>
-                    <?php if (in_array($user['role'], ['hr_manager', 'super_admin', 'manager', 'managing_director', 'section_head', 'dept_head'])): ?>
+                    <?php if (in_array($user['role'], ['hr_manager', 'super_admin', 'manager', 'managing_director','dept_head' , 'section_head',  'sub_section_head'])): ?>
                         <a href="performance_appraisal.php" class="leave-tab">Performance Appraisal</a>
                     <?php endif; ?>
                     <?php if (in_array($user['role'], ['hr_manager', 'super_admin', 'manager'])): ?>
@@ -947,41 +485,38 @@ include 'nav_bar.php';
                     <?php endif; ?>
                     <a href="completed_appraisals.php" class="leave-tab">Completed Appraisals</a>
                 </div>
-                
                 <?php if ($flash_message): ?>
                 <div class="alert alert-<?php echo $flash_type; ?>">
                     <?php echo $flash_message; ?>
                 </div>
                 <?php endif; ?>
-                
                 <div class="tabs">
                     <ul>
-                        <li><a href="#" class="tab-link active" data-tab="goals">Goals</a></li>
-                          <?php if (hasPermission('hr_manager')): ?>
-                            <li><a href="#" class="tab-link" data-tab="strategic-plans">Strategic Plans</a></li>
-                          <li><a href="#" class="tab-link" data-tab="objectives">Objectives</a></li>
-                           <li><a href="#" class="tab-link" data-tab="strategies">Strategies</a></li>
-                            <li><a href="#" class="tab-link" data-tab="activities">Activities</a></li>
+                        <?php $current_tab = $_GET['tab'] ?? 'goals'; ?>
+                        <li><a href="#" class="tab-link <?php echo $current_tab === 'goals' ? 'active' : ''; ?>" data-tab="goals">Goals</a></li>
+                        <?php if (hasPermission('hr_manager')): ?>
+                            <li><a href="#" class="tab-link <?php echo $current_tab === 'strategic-plans' ? 'active' : ''; ?>" data-tab="strategic-plans">Strategic Plans</a></li>
+                            <li><a href="#" class="tab-link <?php echo $current_tab === 'objectives' ? 'active' : ''; ?>" data-tab="objectives">Objectives</a></li>
+                            <li><a href="#" class="tab-link <?php echo $current_tab === 'strategies' ? 'active' : ''; ?>" data-tab="strategies">Strategies</a></li>
+                            <li><a href="#" class="tab-link <?php echo $current_tab === 'activities' ? 'active' : ''; ?>" data-tab="activities">Activities</a></li>
                         <?php endif; ?>
                     </ul>
                 </div>
 
                 <!-- Goals Tab -->
-                <div id="goals" class="tab-content active">
+                <div id="goals" class="tab-content <?php echo $current_tab === 'goals' ? 'active' : ''; ?>">
                     <div class="goals-header">
                         <h3 class="goals-title">Strategic Goals</h3>
                         <div class="plan-selector">
                             <label for="strategic_plan_select">Select Strategic Plan:</label>
-                            <select id="strategic_plan_select">
+                            <select id="strategic_plan_select" class="form-control">
                                 <option value="">-- Choose a plan --</option>
                                 <?php 
-                                // Get the latest strategic plan ID
                                 $latest_plan_id = null;
                                 if (!empty($strategic_plans)) {
                                     $latest_plan = reset($strategic_plans);
                                     $latest_plan_id = $latest_plan['id'];
                                 }
-                                
                                 foreach ($strategic_plans as $plan): 
                                 ?>
                                 <option value="<?php echo $plan['id']; ?>" 
@@ -993,12 +528,9 @@ include 'nav_bar.php';
                             </select>
                         </div>
                     </div>
-                    
-                    <!-- Image container with automatic sizing -->
                     <div class="strategic-plan-image-container">
                         <?php if (!empty($strategic_plans) && isset($latest_plan['image']) && $latest_plan['image']): ?>
-                            <img id="strategic_plan_image" src="<?php echo htmlspecialchars($latest_plan['image']); ?>" 
-                                 alt="Strategic Plan">
+                            <img id="strategic_plan_image" src="<?php echo htmlspecialchars($latest_plan['image']); ?>" alt="Strategic Plan">
                         <?php else: ?>
                             <div class="no-image-placeholder">
                                 <i class="fas fa-image"></i>
@@ -1007,8 +539,6 @@ include 'nav_bar.php';
                             </div>
                         <?php endif; ?>
                     </div>
-                    
-                    <!-- Strategies Table -->
                     <div class="card mt-4">
                         <div class="card-header">
                             <h3 class="card-title">Strategic Plan Details</h3>
@@ -1029,7 +559,9 @@ include 'nav_bar.php';
                                         <th>Y4</th>
                                         <th>Y5</th>
                                         <th>Comment</th>
+                                        <?php if (in_array($user['role'], ['hr_manager', 'dept_head'])): ?>
                                         <th>Actions</th>
+                                        <?php endif; ?>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1048,28 +580,30 @@ include 'nav_bar.php';
                                             <td><?php echo htmlspecialchars($activity['Y4'] ?? 'N/A'); ?></td>
                                             <td><?php echo htmlspecialchars($activity['Y5'] ?? 'N/A'); ?></td>
                                             <td><?php echo htmlspecialchars($activity['comment'] ?? 'N/A'); ?></td>
+                                            <?php if (in_array($user['role'], ['hr_manager', 'dept_head'])): ?>
                                             <td>
-                                               <button class="btn btn-sm btn-primary edit-btn" 
-        onclick="editActivity(
-            <?php echo intval($activity['id']); ?>, 
-            '<?php echo htmlspecialchars(json_encode($activity['activity'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['kpi'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['target'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y1'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y2'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y3'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y4'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y5'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['comment'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>'
-        )">
-    <i class="fas fa-edit"></i> Edit
-</button>
+                                                <button class="btn btn-sm btn-primary edit-activity-btn" 
+                                                        data-id="<?php echo intval($activity['id']); ?>"
+                                                        data-activity="<?php echo htmlspecialchars($activity['activity'] ?? ''); ?>"
+                                                        data-kpi="<?php echo htmlspecialchars($activity['kpi'] ?? ''); ?>"
+                                                        data-target="<?php echo htmlspecialchars($activity['target'] ?? ''); ?>"
+                                                        data-y1="<?php echo htmlspecialchars($activity['Y1'] ?? ''); ?>"
+                                                        data-y2="<?php echo htmlspecialchars($activity['Y2'] ?? ''); ?>"
+                                                        data-y3="<?php echo htmlspecialchars($activity['Y3'] ?? ''); ?>"
+                                                        data-y4="<?php echo htmlspecialchars($activity['Y4'] ?? ''); ?>"
+                                                        data-y5="<?php echo htmlspecialchars($activity['Y5'] ?? ''); ?>"
+                                                        data-comment="<?php echo htmlspecialchars($activity['comment'] ?? ''); ?>">
+                                                    <i class="fas fa-edit"></i> Edit
+                                                </button>
                                             </td>
+                                            <?php endif; ?>
                                         </tr>
                                         <?php endforeach; ?>
                                     <?php else: ?>
                                     <tr>
-                                        <td colspan="13" class="text-center">No activities found. Please add activities in the Activities tab.</td>
+                                        <td colspan="<?php echo in_array($user['role'], ['hr_manager', 'dept_head']) ? '13' : '12'; ?>" class="text-center">
+                                            No activities found. Please add activities in the Activities tab.
+                                        </td>
                                     </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -1079,7 +613,8 @@ include 'nav_bar.php';
                 </div>
 
                 <!-- Strategic Plans Tab -->
-                <div id="strategic-plans" class="tab-content">
+                <?php if (hasPermission('hr_manager')): ?>
+                <div id="strategic-plans" class="tab-content <?php echo $current_tab === 'strategic-plans' ? 'active' : ''; ?>">
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Strategic Plans</h3>
@@ -1124,7 +659,13 @@ include 'nav_bar.php';
                                     <td><?php echo formatDate($plan['created_at']); ?></td>
                                     <td>
                                         <button class="btn btn-sm btn-primary" 
-                                                onclick="editStrategicPlan(<?php echo $plan['id']; ?>, '<?php echo addslashes(htmlspecialchars($plan['name'])); ?>', '<?php echo $plan['start_date']; ?>', '<?php echo $plan['end_date']; ?>', '<?php echo addslashes(htmlspecialchars($plan['image'] ?? '')); ?>')">
+                                                onclick="editStrategicPlan(
+                                                    <?php echo intval($plan['id']); ?>,
+                                                    '<?php echo addslashes($plan['name'] ?? ''); ?>',
+                                                    '<?php echo addslashes($plan['start_date'] ?? ''); ?>',
+                                                    '<?php echo addslashes($plan['end_date'] ?? ''); ?>',
+                                                    '<?php echo addslashes($plan['image'] ?? ''); ?>'
+                                                )">
                                             <i class="fas fa-edit"></i> Edit
                                         </button>
                                         <a href="strategic_plan.php?action=delete_strategic_plan&id=<?php echo $plan['id']; ?>" 
@@ -1140,9 +681,11 @@ include 'nav_bar.php';
                         <?php endif; ?>
                     </div>
                 </div>
-                
+                <?php endif; ?>
+
                 <!-- Objectives Tab -->
-                <div id="objectives" class="tab-content">
+                <?php if (hasPermission('hr_manager')): ?>
+                <div id="objectives" class="tab-content <?php echo $current_tab === 'objectives' ? 'active' : ''; ?>">
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Objectives</h3>
@@ -1181,7 +724,13 @@ include 'nav_bar.php';
                                     <td><?php echo formatDate($objective['created_at']); ?></td>
                                     <td>
                                         <button class="btn btn-sm btn-primary" 
-                                                onclick="editObjective(<?php echo $objective['id']; ?>, <?php echo $objective['strategic_plan_id']; ?>, '<?php echo addslashes(htmlspecialchars($objective['name'])); ?>', '<?php echo $objective['start_date']; ?>', '<?php echo $objective['end_date']; ?>')">
+                                                onclick="editObjective(
+                                                    <?php echo intval($objective['id']); ?>,
+                                                    <?php echo intval($objective['strategic_plan_id']); ?>,
+                                                    '<?php echo addslashes($objective['name'] ?? ''); ?>',
+                                                    '<?php echo addslashes($objective['start_date'] ?? ''); ?>',
+                                                    '<?php echo addslashes($objective['end_date'] ?? ''); ?>'
+                                                )">
                                             <i class="fas fa-edit"></i> Edit
                                         </button>
                                         <a href="strategic_plan.php?action=delete_objective&id=<?php echo $objective['id']; ?>" 
@@ -1197,10 +746,11 @@ include 'nav_bar.php';
                         <?php endif; ?>
                     </div>
                 </div>
-                
+                <?php endif; ?>
+
                 <!-- Strategies Tab -->
                 <?php if (hasPermission('hr_manager')): ?>
-                <div id="strategies" class="tab-content">
+                <div id="strategies" class="tab-content <?php echo $current_tab === 'strategies' ? 'active' : ''; ?>">
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Strategies</h3>
@@ -1241,7 +791,14 @@ include 'nav_bar.php';
                                     <td><?php echo formatDate($strategy['created_at']); ?></td>
                                     <td>
                                         <button class="btn btn-sm btn-primary" 
-                                                onclick="editStrategy(<?php echo $strategy['id']; ?>, <?php echo $strategy['strategic_plan_id']; ?>, <?php echo $strategy['objective_id'] ?? 'null'; ?>, '<?php echo addslashes(htmlspecialchars($strategy['name'])); ?>', '<?php echo $strategy['start_date']; ?>', '<?php echo $strategy['end_date']; ?>')">
+                                                onclick="editStrategy(
+                                                    <?php echo intval($strategy['id']); ?>,
+                                                    <?php echo intval($strategy['strategic_plan_id']); ?>,
+                                                    <?php echo $strategy['objective_id'] ? intval($strategy['objective_id']) : 'null'; ?>,
+                                                    '<?php echo addslashes($strategy['name'] ?? ''); ?>',
+                                                    '<?php echo addslashes($strategy['start_date'] ?? ''); ?>',
+                                                    '<?php echo addslashes($strategy['end_date'] ?? ''); ?>'
+                                                )">
                                             <i class="fas fa-edit"></i> Edit
                                         </button>
                                         <a href="strategic_plan.php?action=delete_strategy&id=<?php echo $strategy['id']; ?>" 
@@ -1261,7 +818,7 @@ include 'nav_bar.php';
 
                 <!-- Activities Tab -->
                 <?php if (hasPermission('hr_manager')): ?>
-                <div id="activities" class="tab-content">
+                <div id="activities" class="tab-content <?php echo $current_tab === 'activities' ? 'active' : ''; ?>">
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Activities</h3>
@@ -1299,21 +856,19 @@ include 'nav_bar.php';
                                     <td><?php echo htmlspecialchars($activity['target'] ?? 'N/A'); ?></td>
                                     <td><?php echo formatDate($activity['created_at']); ?></td>
                                     <td>
-                                       <button class="btn btn-sm btn-primary edit-btn" 
-        onclick="editActivity(
-            <?php echo intval($activity['id']); ?>, 
-            '<?php echo htmlspecialchars(json_encode($activity['activity'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['kpi'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['target'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y1'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y2'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y3'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y4'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['Y5'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>', 
-            '<?php echo htmlspecialchars(json_encode($activity['comment'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>'
-        )">
-    <i class="fas fa-edit"></i> Edit
-</button>
+                                        <button class="btn btn-sm btn-primary edit-activity-btn" 
+                                                data-id="<?php echo intval($activity['id']); ?>"
+                                                data-activity="<?php echo htmlspecialchars($activity['activity'] ?? ''); ?>"
+                                                data-kpi="<?php echo htmlspecialchars($activity['kpi'] ?? ''); ?>"
+                                                data-target="<?php echo htmlspecialchars($activity['target'] ?? ''); ?>"
+                                                data-y1="<?php echo htmlspecialchars($activity['Y1'] ?? ''); ?>"
+                                                data-y2="<?php echo htmlspecialchars($activity['Y2'] ?? ''); ?>"
+                                                data-y3="<?php echo htmlspecialchars($activity['Y3'] ?? ''); ?>"
+                                                data-y4="<?php echo htmlspecialchars($activity['Y4'] ?? ''); ?>"
+                                                data-y5="<?php echo htmlspecialchars($activity['Y5'] ?? ''); ?>"
+                                                data-comment="<?php echo htmlspecialchars($activity['comment'] ?? ''); ?>">
+                                            <i class="fas fa-edit"></i> Edit
+                                        </button>
                                         <a href="strategic_plan.php?action=delete_activity&id=<?php echo $activity['id']; ?>" 
                                            class="btn btn-sm btn-danger" 
                                            onclick="return confirm('Are you sure you want to delete this activity?')">
@@ -1328,581 +883,503 @@ include 'nav_bar.php';
                     </div>
                 </div>
                 <?php endif; ?>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Add Strategic Plan Modal -->
-    <div id="addStrategicPlanModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Add Strategic Plan</h3>
-                <button class="close" onclick="closeModal('addStrategicPlanModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php" enctype="multipart/form-data">
-                <input type="hidden" name="add_strategic_plan" value="1">
-                <div class="form-group">
-                    <label class="form-label" for="name">Name</label>
-                    <input type="text" class="form-control" id="name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="start_date">Start Date</label>
-                        <input type="date" class="form-control" id="start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="end_date">End Date</label>
-                        <input type="date" class="form-control" id="end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="image">Image</label>
-                    <input type="file" class="form-control" id="image" name="image" accept="image/jpeg,image/png,image/gif">
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('addStrategicPlanModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Strategic Plan</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Edit Strategic Plan Modal -->
-    <div id="editStrategicPlanModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Edit Strategic Plan</h3>
-                <button class="close" onclick="closeModal('editStrategicPlanModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php" enctype="multipart/form-data">
-                <input type="hidden" name="update_strategic_plan" value="1">
-                <input type="hidden" id="edit_strategic_plan_id" name="id">
-                <div class="form-group">
-                    <label class="form-label" for="edit_name">Name</label>
-                    <input type="text" class="form-control" id="edit_name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_start_date">Start Date</label>
-                        <input type="date" class="form-control" id="edit_start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="edit_end_date">End Date</label>
-                        <input type="date" class="form-control" id="edit_end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Current Image</label>
-                    <img id="edit_image_preview" src="" alt="Current Image" class="preview-image" style="display: none;">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_image">New Image (optional)</label>
-                    <input type="file" class="form-control" id="edit_image" name="image" accept="image/jpeg,image/png,image/gif">
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('editStrategicPlanModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Update Strategic Plan</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Add Objective Modal -->
-    <div id="addObjectiveModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Add Objective</h3>
-                <button class="close" onclick="closeModal('addObjectiveModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="add_objective" value="1">
-                <div class="form-group">
-                    <label class="form-label" for="strategic_plan_id">Strategic Plan</label>
-                    <select class="form-control" id="strategic_plan_id" name="strategic_plan_id" required>
-                        <option value="">Select Strategic Plan</option>
-                        <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="obj_name">Name</label>
-                    <input type="text" class="form-control" id="obj_name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="obj_start_date">Start Date</label>
-                        <input type="date" class="form-control" id="obj_start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="obj_end_date">End Date</label>
-                        <input type="date" class="form-control" id="obj_end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('addObjectiveModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Objective</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Edit Objective Modal -->
-    <div id="editObjectiveModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Edit Objective</h3>
-                <button class="close" onclick="closeModal('editObjectiveModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="update_objective" value="1">
-                <input type="hidden" id="edit_objective_id" name="id">
-                <div class="form-group">
-                    <label class="form-label" for="edit_obj_strategic_plan_id">Strategic Plan</label>
-                    <select class="form-control" id="edit_obj_strategic_plan_id" name="strategic_plan_id" required>
-                        <option value="">Select Strategic Plan</option>
-                        <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_obj_name">Name</label>
-                    <input type="text" class="form-control" id="edit_obj_name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_obj_start_date">Start Date</label>
-                        <input type="date" class="form-control" id="edit_obj_start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="edit_obj_end_date">End Date</label>
-                        <input type="date" class="form-control" id="edit_obj_end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('editObjectiveModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Update Objective</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Add Strategy Modal -->
-    <div id="addStrategyModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Add Strategy</h3>
-                <button class="close" onclick="closeModal('addStrategyModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="add_strategy" value="1">
-                <div class="form-group">
-                    <label class="form-label" for="strategy_strategic_plan_id">Strategic Plan</label>
-                    <select class="form-control" id="strategy_strategic_plan_id" name="strategic_plan_id" required>
-                        <option value="">Select Strategic Plan</option>
-                        <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="strategy_objective_id">Objective</label>
-                    <select class="form-control" id="strategy_objective_id" name="objective_id" required>
-                        <option value="">Select Objective</option>
-                        <?php foreach ($objectives_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="strategy_name">Name</label>
-                    <input type="text" class="form-control" id="strategy_name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="strategy_start_date">Start Date</label>
-                        <input type="date" class="form-control" id="strategy_start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="strategy_end_date">End Date</label>
-                        <input type="date" class="form-control" id="strategy_end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('addStrategyModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Strategy</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Edit Strategy Modal -->
-    <div id="editStrategyModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Edit Strategy</h3>
-                <button class="close" onclick="closeModal('editStrategyModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="update_strategy" value="1">
-                <input type="hidden" id="edit_strategy_id" name="id">
-                <div class="form-group">
-                    <label class="form-label" for="edit_strategy_strategic_plan_id">Strategic Plan</label>
-                    <select class="form-control" id="edit_strategy_strategic_plan_id" name="strategic_plan_id" required>
-                        <option value="">Select Strategic Plan</option>
-                        <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_strategy_objective_id">Objective</label>
-                    <select class="form-control" id="edit_strategy_objective_id" name="objective_id" required>
-                        <option value="">Select Objective</option>
-                        <?php foreach ($objectives_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_strategy_name">Name</label>
-                    <input type="text" class="form-control" id="edit_strategy_name" name="name" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_strategy_start_date">Start Date</label>
-                        <input type="date" class="form-control" id="edit_strategy_start_date" name="start_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="edit_strategy_end_date">End Date</label>
-                        <input type="date" class="form-control" id="edit_strategy_end_date" name="end_date" required>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('editStrategyModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Update Strategy</button>
-                </div>
-            </form>
-        </div>
-    </div>
 
-    <!-- Add Activity Modal -->
-    <div id="addActivityModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Add Activity</h3>
-                <button class="close" onclick="closeModal('addActivityModal')">&times;</button>
+                <!-- Modals -->
+                <?php if (hasPermission('hr_manager')): ?>
+                <!-- All modals remain unchanged (no inline CSS) -->
+                <div id="addStrategicPlanModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php" enctype="multipart/form-data">
+                            <div class="form-group">
+                                <label for="name">Plan Name</label>
+                                <input type="text" class="form-control" name="name" placeholder="Plan Name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="start_date">Start Date</label>
+                                <input type="date" class="form-control" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="end_date">End Date</label>
+                                <input type="date" class="form-control" name="end_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="image">Image</label>
+                                <input type="file" class="form-control" name="image" accept="image/*">
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="add_strategic_plan">Add Strategic Plan</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('addStrategicPlanModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Edit Strategic Plan Modal -->
+                <div id="editStrategicPlanModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php" enctype="multipart/form-data">
+                            <input type="hidden" id="edit_strategic_plan_id" name="id">
+                            <div class="form-group">
+                                <label for="edit_name">Plan Name</label>
+                                <input type="text" class="form-control" id="edit_name" name="name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_start_date">Start Date</label>
+                                <input type="date" class="form-control" id="edit_start_date" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_end_date">End Date</label>
+                                <input type="date" class="form-control" id="edit_end_date" name="end_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_image">Image</label>
+                                <input type="file" class="form-control" id="edit_image" name="image" accept="image/*">
+                                <img id="edit_image_preview" style="display: none; margin-top: 10px;" width="100" alt="Preview">
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="update_strategic_plan">Update Strategic Plan</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('editStrategicPlanModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Add Objective Modal -->
+                <div id="addObjectiveModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <div class="form-group">
+                                <label for="strategic_plan_id">Strategic Plan</label>
+                                <select class="form-control" name="strategic_plan_id" required>
+                                    <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="name">Objective Name</label>
+                                <input type="text" class="form-control" name="name" placeholder="Objective Name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="start_date">Start Date</label>
+                                <input type="date" class="form-control" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="end_date">End Date</label>
+                                <input type="date" class="form-control" name="end_date" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="add_objective">Add Objective</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('addObjectiveModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Edit Objective Modal -->
+                <div id="editObjectiveModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <input type="hidden" id="edit_objective_id" name="id">
+                            <div class="form-group">
+                                <label for="edit_obj_strategic_plan_id">Strategic Plan</label>
+                                <select class="form-control" id="edit_obj_strategic_plan_id" name="strategic_plan_id" required>
+                                    <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_obj_name">Objective Name</label>
+                                <input type="text" class="form-control" id="edit_obj_name" name="name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_obj_start_date">Start Date</label>
+                                <input type="date" class="form-control" id="edit_obj_start_date" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_obj_end_date">End Date</label>
+                                <input type="date" class="form-control" id="edit_obj_end_date" name="end_date" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="update_objective">Update Objective</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('editObjectiveModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Add Strategy Modal -->
+                <div id="addStrategyModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <div class="form-group">
+                                <label for="strategic_plan_id">Strategic Plan</label>
+                                <select class="form-control" name="strategic_plan_id" required>
+                                    <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="objective_id">Objective (Optional)</label>
+                                <select class="form-control" name="objective_id">
+                                    <option value="">Select Objective</option>
+                                    <?php foreach ($objectives_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="name">Strategy Name</label>
+                                <input type="text" class="form-control" name="name" placeholder="Strategy Name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="start_date">Start Date</label>
+                                <input type="date" class="form-control" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="end_date">End Date</label>
+                                <input type="date" class="form-control" name="end_date" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="add_strategy">Add Strategy</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('addStrategyModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Edit Strategy Modal -->
+                <div id="editStrategyModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <input type="hidden" id="edit_strategy_id" name="id">
+                            <div class="form-group">
+                                <label for="edit_strategy_strategic_plan_id">Strategic Plan</label>
+                                <select class="form-control" id="edit_strategy_strategic_plan_id" name="strategic_plan_id" required>
+                                    <?php foreach ($strategic_plans_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_strategy_objective_id">Objective (Optional)</label>
+                                <select class="form-control" id="edit_strategy_objective_id" name="objective_id">
+                                    <option value="">Select Objective</option>
+                                    <?php foreach ($objectives_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_strategy_name">Strategy Name</label>
+                                <input type="text" class="form-control" id="edit_strategy_name" name="name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_strategy_start_date">Start Date</label>
+                                <input type="date" class="form-control" id="edit_strategy_start_date" name="start_date" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_strategy_end_date">End Date</label>
+                                <input type="date" class="form-control" id="edit_strategy_end_date" name="end_date" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="update_strategy">Update Strategy</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('editStrategyModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Add Activity Modal -->
+                <div id="addActivityModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <div class="form-group">
+                                <label for="strategy_id">Strategy</label>
+                                <select class="form-control" name="strategy_id" required>
+                                    <?php foreach ($strategies_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="activity">Activity</label>
+                                <input type="text" class="form-control" name="activity" placeholder="Activity" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="kpi">KPI</label>
+                                <input type="text" class="form-control" name="kpi" placeholder="KPI">
+                            </div>
+                            <div class="form-group">
+                                <label for="target">Target</label>
+                                <input type="text" class="form-control" name="target" placeholder="Target">
+                            </div>
+                            <div class="form-group">
+                                <label for="Y1">Year 1</label>
+                                <input type="text" class="form-control" name="Y1" placeholder="Year 1">
+                            </div>
+                            <div class="form-group">
+                                <label for="Y2">Year 2</label>
+                                <input type="text" class="form-control" name="Y2" placeholder="Year 2">
+                            </div>
+                            <div class="form-group">
+                                <label for="Y3">Year 3</label>
+                                <input type="text" class="form-control" name="Y3" placeholder="Year 3">
+                            </div>
+                            <div class="form-group">
+                                <label for="Y4">Year 4</label>
+                                <input type="text" class="form-control" name="Y4" placeholder="Year 4">
+                            </div>
+                            <div class="form-group">
+                                <label for="Y5">Year 5</label>
+                                <input type="text" class="form-control" name="Y5" placeholder="Year 5">
+                            </div>
+                            <div class="form-group">
+                                <label for="comment">Comment</label>
+                                <textarea class="form-control" name="comment" placeholder="Comment"></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="add_activity">Add Activity</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('addActivityModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <!-- Edit Activity Modal -->
+                <div id="editActivityModal" class="modal">
+                    <div class="modal-content">
+                        <form method="post" action="strategic_plan.php">
+                            <input type="hidden" id="edit_activity_id" name="id">
+                            <div class="form-group">
+                                <label for="strategy_id">Strategy</label>
+                                <select class="form-control" name="strategy_id" required>
+                                    <?php foreach ($strategies_dropdown as $id => $name): ?>
+                                    <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_activity">Activity</label>
+                                <input type="text" class="form-control" id="edit_activity" name="activity" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_kpi">KPI</label>
+                                <input type="text" class="form-control" id="edit_kpi" name="kpi">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_target">Target</label>
+                                <input type="text" class="form-control" id="edit_target" name="target">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_y1">Year 1</label>
+                                <input type="text" class="form-control" id="edit_y1" name="Y1">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_y2">Year 2</label>
+                                <input type="text" class="form-control" id="edit_y2" name="Y2">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_y3">Year 3</label>
+                                <input type="text" class="form-control" id="edit_y3" name="Y3">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_y4">Year 4</label>
+                                <input type="text" class="form-control" id="edit_y4" name="Y4">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_y5">Year 5</label>
+                                <input type="text" class="form-control" id="edit_y5" name="Y5">
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_comment">Comment</label>
+                                <textarea class="form-control" id="edit_comment" name="comment"></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary" name="update_activity">Update Activity</button>
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('editActivityModal')">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+                <?php endif; ?>
             </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="add_activity" value="1">
-                <div class="form-group">
-                    <label class="form-label" for="add_activity_strategy_id">Strategy</label>
-                    <select class="form-control" id="add_activity_strategy_id" name="strategy_id" required>
-                        <option value="">Select Strategy</option>
-                        <?php foreach ($strategies_dropdown as $id => $name): ?>
-                        <option value="<?php echo $id; ?>"><?php echo htmlspecialchars($name); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="add_activity">Activity</label>
-                    <textarea class="form-control" id="add_activity" name="activity" rows="3" required></textarea>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="add_kpi">KPI</label>
-                    <input type="text" class="form-control" id="add_kpi" name="kpi" required>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="add_target">Target</label>
-                    <input type="text" class="form-control" id="add_target" name="target" required>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="add_y1">Y1</label>
-                        <input type="number" class="form-control" id="add_y1" name="Y1" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="add_y2">Y2</label>
-                        <input type="number" class="form-control" id="add_y2" name="Y2" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="add_y3">Y3</label>
-                        <input type="number" class="form-control" id="add_y3" name="Y3" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="add_y4">Y4</label>
-                        <input type="number" class="form-control" id="add_y4" name="Y4" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="add_y5">Y5</label>
-                        <input type="number" class="form-control" id="add_y5" name="Y5" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="add_comment">Comment</label>
-                    <textarea class="form-control" id="add_comment" name="comment" rows="3"></textarea>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('addActivityModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Activity</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Edit Activity Modal -->
-    <div id="editActivityModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Edit Activity</h3>
-                <button class="close" onclick="closeModal('editActivityModal')">&times;</button>
-            </div>
-            <form method="POST" action="strategic_plan.php">
-                <input type="hidden" name="update_activity" value="1">
-                <input type="hidden" id="edit_activity_id" name="id">
-                <div class="form-group">
-                    <label class="form-label" for="edit_activity">Activity</label>
-                    <textarea class="form-control" id="edit_activity" name="activity" rows="3"></textarea>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_kpi">KPI</label>
-                    <input type="text" class="form-control" id="edit_kpi" name="kpi">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_target">Target</label>
-                    <input type="text" class="form-control" id="edit_target" name="target">
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_y1">Y1</label>
-                        <input type="number" class="form-control" id="edit_y1" name="Y1" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="edit_y2">Y2</label>
-                        <input type="number" class="form-control" id="edit_y2" name="Y2" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_y3">Y3</label>
-                        <input type="number" class="form-control" id="edit_y3" name="Y3" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="edit_y4">Y4</label>
-                        <input type="number" class="form-control" id="edit_y4" name="Y4" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label" for="edit_y5">Y5</label>
-                        <input type="number" class="form-control" id="edit_y5" name="Y5" step="0.01" min="0">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="edit_comment">Comment</label>
-                    <textarea class="form-control" id="edit_comment" name="comment" rows="3"></textarea>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('editActivityModal')">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Update Activity</button>
-                </div>
-            </form>
         </div>
     </div>
 
     <script>
-        // Tab switching function
-        function showTab(tabId) {
-            document.querySelectorAll('.tab-content').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelectorAll('.tab-link').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            const tabContent = document.getElementById(tabId);
-            if (tabContent) {
-                tabContent.classList.add('active');
-                const tabLink = document.querySelector(`.tab-link[data-tab="${tabId}"]`);
-                if (tabLink) {
-                    tabLink.classList.add('active');
-                }
-            }
-        }
+        // Ensure tab content visibility (since missing in global CSS)
+        const style = document.createElement('style');
+        style.textContent = `
+            .tab-content { display: none; }
+            .tab-content.active { display: block; }
+        `;
+        document.head.appendChild(style);
 
-        // Add event listeners to tabs
+        // Tab switching
         document.querySelectorAll('.tab-link').forEach(tab => {
-            tab.addEventListener('click', (e) => {
+            tab.addEventListener('click', function(e) {
                 e.preventDefault();
-                showTab(tab.getAttribute('data-tab'));
+                document.querySelectorAll('.tab-link').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                this.classList.add('active');
+                document.getElementById(this.dataset.tab).classList.add('active');
             });
         });
 
-        // Set active tab based on URL query parameter
-        document.addEventListener('DOMContentLoaded', () => {
-            const urlParams = new URLSearchParams(window.location.search);
-            const activeTab = urlParams.get('tab') || 'goals';
-            if (document.getElementById(activeTab)) {
-                showTab(activeTab);
-            }
-
-            // Handle strategic plan selection
-            const planSelect = document.getElementById('strategic_plan_select');
-            const goalsImage = document.getElementById('strategic_plan_image');
-            const placeholder = document.querySelector('.no-image-placeholder');
-
-            // Plan selector change event
-            planSelect.addEventListener('change', function() {
-                const selectedOption = this.options[this.selectedIndex];
-                const imageUrl = selectedOption.getAttribute('data-image');
-                const planId = selectedOption.value;
-                
-                // Update image
-                if (imageUrl) {
-                    goalsImage.src = imageUrl;
-                    goalsImage.style.display = 'block';
-                    if (placeholder) placeholder.style.display = 'none';
-                } else {
-                    goalsImage.style.display = 'none';
-                    if (placeholder) placeholder.style.display = 'block';
-                }
-                
-                // Filter strategies table
-                const tableRows = document.querySelectorAll('#strategies-table tbody tr');
-                tableRows.forEach(row => {
-                    if (planId === '' || row.getAttribute('data-plan-id') === planId) {
-                        row.style.display = '';
-                    } else {
-                        row.style.display = 'none';
-                    }
-                });
-            });
-
-            // Initialize image and placeholder based on default selection
-            const initialSelected = planSelect.options[planSelect.selectedIndex];
-            if (initialSelected && initialSelected.getAttribute('data-image')) {
-                goalsImage.src = initialSelected.getAttribute('data-image');
-                goalsImage.style.display = 'block';
-                if (placeholder) placeholder.style.display = 'none';
-            } else {
-                goalsImage.style.display = 'none';
-                if (placeholder) placeholder.style.display = 'block';
-            }
-
-            // Initialize table filtering based on default selection
-            const event = new Event('change');
-            planSelect.dispatchEvent(event);
-        });
-
-        // Modal functions with improved error handling
+        // Modal handling
         function openModal(modalId) {
             const modal = document.getElementById(modalId);
-            if (modal) {
-                modal.style.display = 'flex';
-                // Add modal backdrop styling
-                modal.style.position = 'fixed';
-                modal.style.top = '0';
-                modal.style.left = '0';
-                modal.style.width = '100%';
-                modal.style.height = '100%';
-                modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-                modal.style.justifyContent = 'center';
-                modal.style.alignItems = 'center';
-                modal.style.zIndex = '1000';
-            } else {
-                console.error(`Modal ${modalId} not found`);
-            }
+            if (modal) modal.style.display = 'block';
         }
-
         function closeModal(modalId) {
             const modal = document.getElementById(modalId);
-            if (modal) {
-                modal.style.display = 'none';
-            } else {
-                console.error(`Modal ${modalId} not found`);
+            if (modal) modal.style.display = 'none';
+        }
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
             }
         }
 
-        function editStrategicPlan(id, name, startDate, endDate, image) {
-            document.getElementById('edit_strategic_plan_id').value = id;
-            document.getElementById('edit_name').value = name;
-            document.getElementById('edit_start_date').value = startDate;
-            document.getElementById('edit_end_date').value = endDate;
-            const preview = document.getElementById('edit_image_preview');
-            if (image) {
-                preview.src = image;
-                preview.style.display = 'block';
-            } else {
-                preview.style.display = 'none';
-            }
-            openModal('editStrategicPlanModal');
-        }
-
-        function editObjective(id, strategicPlanId, name, startDate, endDate) {
-            document.getElementById('edit_objective_id').value = id;
-            document.getElementById('edit_obj_strategic_plan_id').value = strategicPlanId;
-            document.getElementById('edit_obj_name').value = name;
-            document.getElementById('edit_obj_start_date').value = startDate;
-            document.getElementById('edit_obj_end_date').value = endDate;
-            openModal('editObjectiveModal');
-        }
-
-        function editStrategy(id, strategicPlanId, objectiveId, name, startDate, endDate) {
-            document.getElementById('edit_strategy_id').value = id;
-            document.getElementById('edit_strategy_strategic_plan_id').value = strategicPlanId;
-            document.getElementById('edit_strategy_objective_id').value = objectiveId || '';
-            document.getElementById('edit_strategy_name').value = name;
-            document.getElementById('edit_strategy_start_date').value = startDate;
-            document.getElementById('edit_strategy_end_date').value = endDate;
-            openModal('editStrategyModal');
-        }
-
-        // Fixed editActivity function with proper error handling and field validation
+        // Edit Activity - FIXED: Using data attributes instead of inline JavaScript
         function editActivity(id, activity, kpi, target, y1, y2, y3, y4, y5, comment) {
-            console.log('Editing activity with ID:', id); // Debug line
-            
-            // Ensure the modal exists
             const modal = document.getElementById('editActivityModal');
             if (!modal) {
                 console.error('Edit Activity Modal not found');
                 return;
             }
             
-            // Helper function to set field values with proper null/undefined handling
-            const setFieldValue = (fieldId, value) => {
-                const field = document.getElementById(fieldId);
-                if (field) {
-                    field.value = value || '';
-                } else {
-                    console.error(`Field ${fieldId} not found`);
-                }
-            };
+            // Safely set values with fallbacks
+            document.getElementById('edit_activity_id').value = id || '';
+            document.getElementById('edit_activity').value = activity || '';
+            document.getElementById('edit_kpi').value = kpi || '';
+            document.getElementById('edit_target').value = target || '';
+            document.getElementById('edit_y1').value = y1 || '';
+            document.getElementById('edit_y2').value = y2 || '';
+            document.getElementById('edit_y3').value = y3 || '';
+            document.getElementById('edit_y4').value = y4 || '';
+            document.getElementById('edit_y5').value = y5 || '';
+            document.getElementById('edit_comment').value = comment || '';
             
-            // Set all form field values
-            setFieldValue('edit_activity_id', id);
-            setFieldValue('edit_activity', activity);
-            setFieldValue('edit_kpi', kpi);
-            setFieldValue('edit_target', target);
-            setFieldValue('edit_y1', y1);
-            setFieldValue('edit_y2', y2);
-            setFieldValue('edit_y3', y3);
-            setFieldValue('edit_y4', y4);
-            setFieldValue('edit_y5', y5);
-            setFieldValue('edit_comment', comment);
-            
-            // Open the modal
             openModal('editActivityModal');
         }
 
-        // Close modals when clicking outside
-        window.onclick = function(event) {
-            if (event.target.classList.contains('modal')) {
-                event.target.style.display = 'none';
+        // Edit Strategic Plan - FIXED: Using string parameters with proper escaping
+        function editStrategicPlan(id, name, start_date, end_date, image) {
+            const modal = document.getElementById('editStrategicPlanModal');
+            if (!modal) {
+                console.error('Edit Strategic Plan Modal not found');
+                return;
+            }
+            
+            document.getElementById('edit_strategic_plan_id').value = id || '';
+            document.getElementById('edit_name').value = name || '';
+            document.getElementById('edit_start_date').value = start_date || '';
+            document.getElementById('edit_end_date').value = end_date || '';
+            
+            const preview = document.getElementById('edit_image_preview');
+            if (preview) {
+                if (image) {
+                    preview.src = image;
+                    preview.style.display = 'block';
+                } else {
+                    preview.style.display = 'none';
+                }
+            }
+            
+            openModal('editStrategicPlanModal');
+        }
+
+        // Edit Objective - FIXED: Using string parameters with proper escaping
+        function editObjective(id, strategic_plan_id, name, start_date, end_date) {
+            const modal = document.getElementById('editObjectiveModal');
+            if (!modal) {
+                console.error('Edit Objective Modal not found');
+                return;
+            }
+            
+            document.getElementById('edit_objective_id').value = id || '';
+            document.getElementById('edit_obj_strategic_plan_id').value = strategic_plan_id || '';
+            document.getElementById('edit_obj_name').value = name || '';
+            document.getElementById('edit_obj_start_date').value = start_date || '';
+            document.getElementById('edit_obj_end_date').value = end_date || '';
+            
+            openModal('editObjectiveModal');
+        }
+
+        // Edit Strategy - FIXED: Using string parameters with proper escaping
+        function editStrategy(id, strategic_plan_id, objective_id, name, start_date, end_date) {
+            const modal = document.getElementById('editStrategyModal');
+            if (!modal) {
+                console.error('Edit Strategy Modal not found');
+                return;
+            }
+            
+            document.getElementById('edit_strategy_id').value = id || '';
+            document.getElementById('edit_strategy_strategic_plan_id').value = strategic_plan_id || '';
+            document.getElementById('edit_strategy_objective_id').value = objective_id || '';
+            document.getElementById('edit_strategy_name').value = name || '';
+            document.getElementById('edit_strategy_start_date').value = start_date || '';
+            document.getElementById('edit_strategy_end_date').value = end_date || '';
+            
+            openModal('editStrategyModal');
+        }
+
+        // Event delegation for edit activity buttons using data attributes
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.edit-activity-btn')) {
+                const btn = e.target.closest('.edit-activity-btn');
+                editActivity(
+                    btn.dataset.id,
+                    btn.dataset.activity,
+                    btn.dataset.kpi,
+                    btn.dataset.target,
+                    btn.dataset.y1,
+                    btn.dataset.y2,
+                    btn.dataset.y3,
+                    btn.dataset.y4,
+                    btn.dataset.y5,
+                    btn.dataset.comment
+                );
+            }
+        });
+
+        // Strategic Plan Image Update
+        const planSelect = document.getElementById('strategic_plan_select');
+        if (planSelect) {
+            planSelect.addEventListener('change', function() {
+                const selectedOption = this.options[this.selectedIndex];
+                const imagePath = selectedOption.dataset.image;
+                const imageContainer = document.querySelector('.strategic-plan-image-container');
+                if (imagePath) {
+                    imageContainer.innerHTML = `<img id="strategic_plan_image" src="${imagePath}" alt="Strategic Plan">`;
+                } else {
+                    imageContainer.innerHTML = `
+                        <div class="no-image-placeholder">
+                            <i class="fas fa-image"></i>
+                            <h3>No Strategic Plan Image Available</h3>
+                            <p>Please select a strategic plan with an uploaded image</p>
+                        </div>`;
+                }
+                const planId = this.value;
+                const rows = document.querySelectorAll('#strategies-table tbody tr');
+                rows.forEach(row => {
+                    row.style.display = (!planId || row.dataset.planId == planId) ? '' : 'none';
+                });
+            });
+            if (planSelect.value) {
+                const event = new Event('change');
+                planSelect.dispatchEvent(event);
             }
         }
+
+        // Global error handler
+        window.addEventListener('error', function(e) {
+            console.error('JavaScript Error:', e.error);
+            console.error('File:', e.filename);
+            console.error('Line:', e.lineno);
+            console.error('Column:', e.colno);
+        });
+
+        // Debug function to check if modals exist
+        function checkModals() {
+            const modals = [
+                'editActivityModal',
+                'editStrategicPlanModal', 
+                'editObjectiveModal',
+                'editStrategyModal'
+            ];
+            
+            modals.forEach(modalId => {
+                const modal = document.getElementById(modalId);
+                console.log(`Modal ${modalId}:`, modal ? 'Found' : 'NOT FOUND');
+            });
+        }
+
+        // Call this on page load to verify all modals exist
+        document.addEventListener('DOMContentLoaded', function() {
+            checkModals();
+        });
     </script>
 </body>
+</html>

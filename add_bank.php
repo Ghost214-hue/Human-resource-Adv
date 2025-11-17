@@ -12,7 +12,7 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
-
+require_once 'auth.php';
 require_once 'config.php';
 require_once 'header.php';
 
@@ -24,19 +24,6 @@ $user = [
     'id' => $_SESSION['user_id']
 ];
 
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    $roles = [
-        'super_admin' => 3,
-        'hr_manager' => 2,
-        'dept_head' => 1,
-        'employee' => 0
-    ];
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    return $userLevel >= $requiredLevel;
-}
 
 function getFlashMessage() {
     if (isset($_SESSION['flash_message'])) {

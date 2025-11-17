@@ -12,9 +12,19 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
-
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+require_once 'auth_check.php';
+require_once 'auth.php';
 require_once 'config.php';
+require 'vendor/autoload.php';
 
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
 
 // Get current user from session
 $user = [
@@ -25,23 +35,88 @@ $user = [
     'employee_id' => $_SESSION['employee_id'] ?? null
 ];
 
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
+
+// Function to send supervisor notification email
+function sendSupervisorNotification($appraisal_id, $conn) {
+    require 'email_config.php';
     
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 4,
-        'hr_manager' => 3,
-        'dept_head' => 2,
-        'section_head' => 1,
-        'employee' => 0
-    ];
+    // Get supervisor (appraiser) email and details
+    $emailStmt = $conn->prepare("
+        SELECT e.email, e.first_name, e.last_name, ea.appraisal_cycle_id, ac.name as cycle_name,
+               emp.first_name as employee_first, emp.last_name as employee_last
+        FROM employee_appraisals ea
+        JOIN employees e ON ea.appraiser_id = e.id
+        JOIN appraisal_cycles ac ON ea.appraisal_cycle_id = ac.id
+        JOIN employees emp ON ea.employee_id = emp.id
+        WHERE ea.id = ?
+    ");
+    $emailStmt->bind_param("i", $appraisal_id);
+    $emailStmt->execute();
+    $emailResult = $emailStmt->get_result();
     
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
+    if ($emailData = $emailResult->fetch_assoc()) {
+        $to_email = $emailData['email'];
+        $supervisor_name = $emailData['first_name'] . ' ' . $emailData['last_name'];
+        $employee_name = $emailData['employee_first'] . ' ' . $emailData['employee_last'];
+        $cycle_name = $emailData['cycle_name'];
+        
+        try {
+            $mail = new PHPMailer(true);
+            
+            // Server settings
+            $mail->isSMTP();
+            $mail->Host = SMTP_HOST;
+            $mail->SMTPAuth = true;
+            $mail->Username = SMTP_USERNAME;
+            $mail->Password = SMTP_PASSWORD;
+            $mail->SMTPSecure = SMTP_ENCRYPTION;
+            $mail->Port = SMTP_PORT;
+            
+            // Recipients
+            $mail->setFrom(EMAIL_FROM, EMAIL_FROM_NAME);
+            $mail->addAddress($to_email, $supervisor_name);
+            
+            // Content
+            $mail->isHTML(true);
+            $mail->Subject = 'Employee Comment Submitted - Action Required for ' . $cycle_name;
+            
+            $appraisal_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . 
+                             "://$_SERVER[HTTP_HOST]" . dirname($_SERVER['PHP_SELF']) . 
+                             "/performance_appraisal.php?appraisal_id=" . $appraisal_id;
+            
+            $mail->Body = "
+                <html>
+                <body style='font-family: Arial, sans-serif; line-height: 1.6;'>
+                    <div style='max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;'>
+                        <h2 style='color: #2c3e50;'>Employee Appraisal Comment Notification</h2>
+                        <p>Dear $supervisor_name,</p>
+                        <p>$employee_name has submitted their comments for the performance appraisal in the <strong>$cycle_name</strong> cycle.</p>
+                        <p>Please log in to the HR Management System to review the employee's comments, provide your supervisor comments, and submit the appraisal.</p>
+                        <div style='text-align: center; margin: 25px 0;'>
+                            <a href='$appraisal_url' style='background-color: #4CAF50; color: white; padding: 12px 24px; text-align: center; text-decoration: none; display: inline-block; border-radius: 5px; font-weight: bold;'>Review Appraisal</a>
+                        </div>
+                        <p>If you have any questions, please contact HR.</p>
+                        <br>
+                        <p>Best regards,<br>HR Management Team</p>
+                        <hr style='border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;'>
+                        <p style='font-size: 12px; color: #7f8c8d;'>
+                            This is an automated notification. Please do not reply to this email.
+                        </p>
+                    </div>
+                </body>
+                </html>
+            ";
+            
+            $mail->AltBody = "Dear $supervisor_name,\n\n$employee_name has submitted their comments for the performance appraisal in the $cycle_name cycle.\n\nPlease log in to the HR Management System to review the employee's comments, provide your supervisor comments, and submit the appraisal.\n\nAppraisal URL: $appraisal_url\n\nIf you have any questions, please contact HR.\n\nBest regards,\nHR Management Team";
+            
+            $mail->send();
+            return true;
+        } catch (Exception $e) {
+            error_log("Supervisor notification email could not be sent. Mailer Error: {$mail->ErrorInfo}");
+            return false;
+        }
+    }
+    return false;
 }
 
 function getFlashMessage() {
@@ -106,8 +181,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $updateStmt->bind_param("siii", $employee_comment, $employee_satisfied, $appraisal_id, $currentEmployee['id']);
         
         if ($updateStmt->execute()) {
-            $_SESSION['flash_message'] = 'Your comment has been added successfully.';
-            $_SESSION['flash_type'] = 'success';
+            // Send notification to supervisor
+            $emailSent = sendSupervisorNotification($appraisal_id, $conn);
+            $_SESSION['flash_message'] = 'Your comment has been added successfully.' . 
+                                         ($emailSent ? ' Supervisor has been notified.' : ' Failed to notify supervisor.');
+            $_SESSION['flash_type'] = $emailSent ? 'success' : 'warning';
         } else {
             $_SESSION['flash_message'] = 'Error saving your comment. Please try again.';
             $_SESSION['flash_type'] = 'danger';
@@ -155,7 +233,6 @@ if (!empty($appraisals)) {
     $scoresStmt->execute();
     $scores = $scoresStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     
-    // Group scores by appraisal ID and indicator ID
     foreach ($scores as $score) {
         $scores_by_appraisal[$score['employee_appraisal_id']][$score['performance_indicator_id']] = $score;
     }
@@ -437,17 +514,15 @@ require_once 'nav_bar.php';
                 <?php endif; ?>
 
                  <div class="leave-tabs">
-                      <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director'])): ?>
-                        <a href="Strategic_plan.php" class="leave-tab">Strategic plan</a>
-                    <?php endif; ?>
+                    <a href="strategic_plan.php?tab=goals" class="leave-tab">Strategic Plan</a>
                     <a href="employee_appraisal.php" class="leave-tab active">Employee Appraisal</a>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager','managing_director', 'section_head', 'dept_head'])): ?>
-                        <a href="performance_appraisal.php" class="leave-tab ">Performance Appraisal</a>
+                    <?php if (in_array($user['role'], ['hr_manager', 'super_admin', 'manager', 'managing_director', 'section_head', 'dept_head' , 'sub_section_head'])): ?>
+                        <a href="performance_appraisal.php" class="leave-tab">Performance Appraisal</a>
                     <?php endif; ?>
-                    <?php if(in_array($user['role'], ['hr_manager', 'super_admin', 'manager'])): ?>
+                    <?php if (in_array($user['role'], ['hr_manager', 'super_admin', 'manager'])): ?>
                         <a href="appraisal_management.php" class="leave-tab">Appraisal Management</a>
                     <?php endif; ?>
-                        <a href="completed_appraisals.php" class="leave-tab">Completed Appraisals</a>                   
+                    <a href="completed_appraisals.php" class="leave-tab">Completed Appraisals</a>
                 </div>
                 
                 <?php if (!empty($appraisals)): ?>
@@ -507,11 +582,9 @@ require_once 'nav_bar.php';
                                     </thead>
                                     <tbody>
                                         <?php 
-                                        // Only show indicators that have been scored
                                         foreach ($indicators as $indicator): 
                                             $score_data = $employee_scores[$indicator['id']] ?? null;
                                             
-                                            // Skip indicators that haven't been scored at all
                                             if (!$score_data) {
                                                 continue;
                                             }
@@ -525,7 +598,6 @@ require_once 'nav_bar.php';
                                                         <br><small class="text-muted"><?php echo htmlspecialchars($indicator['description']); ?></small>
                                                     <?php endif; ?>
                                                 </td>
-                                               
                                                 <td>
                                                     <span class="score-display"><?php echo htmlspecialchars($score_data['score']); ?>/<?php echo $indicator['max_score']; ?></span>
                                                 </td>

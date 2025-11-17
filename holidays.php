@@ -14,8 +14,16 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
+require_once 'auth_check.php';
 require_once 'header.php';
 require_once 'config.php';
+require_once 'auth.php';
 $conn = getConnection();
 
 // Get current user from session
@@ -26,26 +34,6 @@ $user = [
     'id' => $_SESSION['user_id']
 ];
 
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    
-    // Permission hierarchy
-    $roles = [
-        'super_admin' => 5,
-        'hr_manager' =>4 ,
-        'managing_director'=>3,
-        'dept_head' => 2,
-        'section head'=>1,
-        'employee' => 0
-    ];
-    
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    
-    return $userLevel >= $requiredLevel;
-}
 
 
 // Check if user has permission to access this page

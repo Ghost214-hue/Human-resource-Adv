@@ -12,9 +12,17 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+// After successful login verification in other pages
+if (!isset($_SESSION['hr_system_user_id'])) {
+    $_SESSION['hr_system_user_id'] = $_SESSION['user_id'];
+    $_SESSION['hr_system_username'] = $_SESSION['user_name'];
+    $_SESSION['hr_system_user_role'] = $_SESSION['user_role'];
+}
 
+require_once 'auth_check.php';
 require_once 'config.php';
 require_once 'header.php';
+require_once 'auth.php';
 
 // Get current user from session
 $user = [
@@ -23,20 +31,6 @@ $user = [
     'role' => $_SESSION['user_role'] ?? 'guest',
     'id' => $_SESSION['user_id']
 ];
-
-// Permission check function
-function hasPermission($requiredRole) {
-    $userRole = $_SESSION['user_role'] ?? 'guest';
-    $roles = [
-        'super_admin' => 3,
-        'hr_manager' => 2,
-        'dept_head' => 1,
-        'employee' => 0
-    ];
-    $userLevel = $roles[$userRole] ?? 0;
-    $requiredLevel = $roles[$requiredRole] ?? 0;
-    return $userLevel >= $requiredLevel;
-}
 
 // Helper functions
 function getStatusBadge($status) {
@@ -310,30 +304,47 @@ include 'nav_bar.php';
 
         /* Tabs Styles */
         .tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
-        }
+    display: flex;
+    background: var(--bg-glass);
+    border-radius: 12px;
+    padding: 0.5rem;
+    margin-bottom: 2rem;
+    border: 1px solid var(--border-color);
+    backdrop-filter: blur(20px);
+    overflow-x: auto;
+    gap: 0.5rem;
+}
 
-        .tabs a {
-            padding: 10px 20px;
-            color: #ffffff;
-            text-decoration: none;
-            border-radius: 8px 8px 0 0;
-            background: rgba(255, 255, 255, 0.05);
-            transition: all 0.3s ease;
-        }
+    
+.tabs a {
+    flex: 1;
+    min-width: 120px;
+    padding: 0.75rem 1.5rem;
+    text-decoration: none;
+    color: var(--text-secondary);
+    font-weight: 500;
+    font-size: 0.875rem;
+    border-radius: 8px;
+    transition: var(--transition);
+    text-align: center;
+    white-space: nowrap;
+    position: relative;
+    background: transparent;
+    border: 1px solid transparent;
+}
 
-        .tabs a:hover {
-            background: rgba(255, 255, 255, 0.15);
-        }
+.tabs a:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--border-color);
+}
 
-        .tabs a.active {
-            background: rgba(255, 255, 255, 0.2);
-            font-weight: bold;
-        }
-
+.tabs a.active {
+    background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+    color: white;
+    box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
+    border-color: var(--primary-color);
+}
         /* Pagination */
         .pagination {
             display: flex;
@@ -460,16 +471,16 @@ include 'nav_bar.php';
         <!-- Main Content -->
         <div class="main-content">
             <div class="content">
-                <!-- Tabs Navigation -->
-                <div class="leave-tabs">
-                    <a href="payroll_management.php">Payroll Management</a>
-                    <a href="deductions.php">Deductions</a>
-                    <a href="add_bank.php">Add Banks</a>
-                    <a href="periods.php" class="active">Periods</a>
-                    <a href="mp_profile.php">MP Profile</a>
-                </div>
-
-                <?php $flash = getFlashMessage(); if ($flash): ?>
+            <!-- Main Navigation Tabs -->
+     <div class="tabs">
+    <a href="payroll_management.php">Payroll Management</a>
+    <a href="deductions.php">Deductions</a>
+    <a href="allowances.php">Allowances</a>
+    <a href="add_bank.php">Add Banks</a>
+    <a href="periods.php" class="active">Periods</a>
+    <a href="mp_profile.php">MP Profile</a>
+    </div>
+                  <?php $flash = getFlashMessage(); if ($flash): ?>
                     <div class="alert alert-<?php echo $flash['type']; ?>">
                         <?php echo htmlspecialchars($flash['message']); ?>
                     </div>
